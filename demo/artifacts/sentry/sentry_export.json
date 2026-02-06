@@ -1,0 +1,3953 @@
+{
+  "issue": {
+    "id": "cf1c4dcc",
+    "shortId": "ZED-9981",
+    "title": "WARN buffer ownership conflict detected",
+    "culprit": "crates/collab/src/db/buffers.rs",
+    "metadata": {
+      "type": "ConcurrencyError",
+      "value": "WARN buffer ownership conflict detected",
+      "filename": "buffers.rs",
+      "function": "acquire_buffer_lock"
+    },
+    "count": 284,
+    "userCount": 89,
+    "firstSeen": "2026-02-05T18:06:25.394071Z",
+    "lastSeen": "2026-02-05T19:59:25.394071Z",
+    "level": "error",
+    "status": "unresolved",
+    "isUnhandled": true,
+    "platform": "rust",
+    "project": {
+      "id": "0d2ad3",
+      "name": "zed",
+      "slug": "zed"
+    },
+    "tags": [
+      [
+        "environment",
+        "production"
+      ],
+      [
+        "server_name",
+        "collab-5"
+      ],
+      [
+        "release",
+        "v0.122.1"
+      ],
+      [
+        "transaction",
+        "/api/buffers/acquire"
+      ],
+      [
+        "pattern_category",
+        "Distributed System Failures"
+      ]
+    ],
+    "assignedTo": null,
+    "annotations": []
+  },
+  "events": [
+    {
+      "eventID": "788e96e6-3385-d212-9821-5217abc80ca8",
+      "context": {
+        "pattern_id": "RACE-001",
+        "buffer_state": {
+          "buffer_id": "12345",
+          "locked_by": null,
+          "lock_acquired_at": null
+        },
+        "request_context": {
+          "user_id": "00a08d1d",
+          "project_id": "67890",
+          "concurrent_users": 9
+        }
+      },
+      "contexts": {
+        "os": {
+          "name": "Linux",
+          "version": "5.15.0"
+        },
+        "runtime": {
+          "name": "rustc",
+          "version": "1.75.0"
+        },
+        "trace": {
+          "trace_id": "84fab461-2621-5c23-d9d5-0112d7dc516e",
+          "span_id": "0c35a02f-9492-7c",
+          "op": "http.server",
+          "status": "internal_error"
+        }
+      },
+      "dateCreated": "2026-02-05T18:12:25.394071Z",
+      "dateReceived": "2026-02-05T18:03:25.394071Z",
+      "entries": [
+        {
+          "type": "exception",
+          "data": {
+            "values": [
+              {
+                "type": "ConcurrencyError",
+                "value": "WARN buffer ownership conflict detected",
+                "mechanism": {
+                  "type": "generic",
+                  "handled": false
+                },
+                "stacktrace": {
+                  "frames": [
+                    {
+                      "filename": "tokio/runtime/scheduler.rs",
+                      "function": "block_on",
+                      "inApp": false,
+                      "lineNo": 220
+                    },
+                    {
+                      "filename": "axum/routing/mod.rs",
+                      "function": "call",
+                      "inApp": false,
+                      "lineNo": 419
+                    },
+                    {
+                      "filename": "tower/service.rs",
+                      "function": "poll_ready",
+                      "inApp": false,
+                      "lineNo": 433
+                    },
+                    {
+                      "filename": "crates/collab/src/db/buffers.rs",
+                      "absPath": "/app/crates/collab/src/db/buffers.rs",
+                      "function": "acquire_buffer_lock",
+                      "module": "crates::collab::src::db::buffers",
+                      "lineNo": 169,
+                      "colNo": 34,
+                      "context": [
+                        [
+                          -3,
+                          "    async fn process_request(&self, req: Request) -> Result<Response> {"
+                        ],
+                        [
+                          -2,
+                          "        let buffer_id = req.buffer_id();"
+                        ],
+                        [
+                          -1,
+                          "        // Check availability before acquiring"
+                        ],
+                        [
+                          0,
+                          "        let lock = self.acquire_buffer_lock(buffer_id).await?;  // <-- ERROR"
+                        ],
+                        [
+                          1,
+                          "        let result = self.process_buffer(&lock).await;"
+                        ],
+                        [
+                          2,
+                          "        Ok(result)"
+                        ]
+                      ],
+                      "inApp": true
+                    },
+                    {
+                      "filename": "crates/collab/src/db/mod.rs",
+                      "absPath": "/app/crates/collab/src/db/mod.rs",
+                      "function": "acquire_buffer_lock",
+                      "module": "crates::collab::src::db::mod",
+                      "lineNo": 49,
+                      "colNo": 24,
+                      "context": [
+                        [
+                          -3,
+                          "    async fn process_request(&self, req: Request) -> Result<Response> {"
+                        ],
+                        [
+                          -2,
+                          "        let buffer_id = req.buffer_id();"
+                        ],
+                        [
+                          -1,
+                          "        // Check availability before acquiring"
+                        ],
+                        [
+                          0,
+                          "        let lock = self.acquire_buffer_lock(buffer_id).await?;  // <-- ERROR"
+                        ],
+                        [
+                          1,
+                          "        let result = self.process_buffer(&lock).await;"
+                        ],
+                        [
+                          2,
+                          "        Ok(result)"
+                        ]
+                      ],
+                      "inApp": true
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "breadcrumbs",
+          "data": {
+            "values": [
+              {
+                "timestamp": "2026-02-05T20:02:25.394071Z",
+                "type": "default",
+                "category": "http",
+                "message": "HTTP request received",
+                "data": {
+                  "method": "POST",
+                  "url": "/api/buffers"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:06:25.394071Z",
+                "type": "default",
+                "category": "query",
+                "message": "Database query",
+                "data": {
+                  "query": "SELECT * FROM buffers WHERE id = $1"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:03:25.394071Z",
+                "type": "default",
+                "category": "info",
+                "message": "Buffer availability check",
+                "data": {
+                  "buffer_id": "12345",
+                  "available": true
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:04:25.394071Z",
+                "type": "default",
+                "category": "debug",
+                "message": "Attempting lock acquisition",
+                "data": {
+                  "buffer_id": "12345"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:02:25.394071Z",
+                "type": "default",
+                "category": "query",
+                "message": "Database query",
+                "data": {
+                  "query": "UPDATE buffers SET locked_by = $1"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:06:25.394071Z",
+                "type": "default",
+                "category": "error",
+                "message": "Lock acquisition failed",
+                "data": {
+                  "reason": "already_locked"
+                },
+                "level": "error"
+              }
+            ]
+          }
+        },
+        {
+          "type": "request",
+          "data": {
+            "method": "POST",
+            "url": "https://api.zed.dev/v1/buffers/acquire",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer [REDACTED]"
+              ],
+              [
+                "X-Request-ID",
+                "2d474e09-f521-e119-9ae9-f458053118b6"
+              ]
+            ],
+            "data": {
+              "buffer_id": "12345",
+              "project_id": "67890"
+            },
+            "inferredContentType": "application/json"
+          }
+        }
+      ],
+      "errors": [],
+      "fingerprints": [
+        "9dae9099-83f2-5c"
+      ],
+      "message": "WARN buffer ownership conflict detected",
+      "sdk": {
+        "name": "sentry.rust",
+        "version": "0.31.0"
+      },
+      "tags": [
+        [
+          "environment",
+          "production"
+        ],
+        [
+          "server_name",
+          "collab-4"
+        ],
+        [
+          "release",
+          "v0.129.0"
+        ],
+        [
+          "transaction",
+          "/api/buffers/acquire"
+        ],
+        [
+          "pattern_category",
+          "Distributed System Failures"
+        ]
+      ],
+      "user": {
+        "id": "ae757a34",
+        "email": "user280@example.com",
+        "ip_address": "192.168.70.12"
+      }
+    },
+    {
+      "eventID": "0bd5e76e-5fac-f893-a9b5-dce8520eacd7",
+      "context": {
+        "pattern_id": "RACE-001",
+        "buffer_state": {
+          "buffer_id": "12345",
+          "locked_by": null,
+          "lock_acquired_at": null
+        },
+        "request_context": {
+          "user_id": "c5b7b64a",
+          "project_id": "67890",
+          "concurrent_users": 10
+        }
+      },
+      "contexts": {
+        "os": {
+          "name": "Linux",
+          "version": "5.15.0"
+        },
+        "runtime": {
+          "name": "rustc",
+          "version": "1.75.0"
+        },
+        "trace": {
+          "trace_id": "7b4ee0b5-af90-afb7-fa3e-7500720ad5be",
+          "span_id": "6855dee7-dc73-cd",
+          "op": "http.server",
+          "status": "internal_error"
+        }
+      },
+      "dateCreated": "2026-02-05T18:15:25.394071Z",
+      "dateReceived": "2026-02-05T18:13:25.394071Z",
+      "entries": [
+        {
+          "type": "exception",
+          "data": {
+            "values": [
+              {
+                "type": "ConcurrencyError",
+                "value": "WARN buffer ownership conflict detected",
+                "mechanism": {
+                  "type": "generic",
+                  "handled": false
+                },
+                "stacktrace": {
+                  "frames": [
+                    {
+                      "filename": "tokio/runtime/scheduler.rs",
+                      "function": "block_on",
+                      "inApp": false,
+                      "lineNo": 156
+                    },
+                    {
+                      "filename": "axum/routing/mod.rs",
+                      "function": "call",
+                      "inApp": false,
+                      "lineNo": 218
+                    },
+                    {
+                      "filename": "tower/service.rs",
+                      "function": "poll_ready",
+                      "inApp": false,
+                      "lineNo": 120
+                    },
+                    {
+                      "filename": "crates/collab/src/db/buffers.rs",
+                      "absPath": "/app/crates/collab/src/db/buffers.rs",
+                      "function": "acquire_buffer_lock",
+                      "module": "crates::collab::src::db::buffers",
+                      "lineNo": 118,
+                      "colNo": 17,
+                      "context": [
+                        [
+                          -3,
+                          "    async fn process_request(&self, req: Request) -> Result<Response> {"
+                        ],
+                        [
+                          -2,
+                          "        let buffer_id = req.buffer_id();"
+                        ],
+                        [
+                          -1,
+                          "        // Check availability before acquiring"
+                        ],
+                        [
+                          0,
+                          "        let lock = self.acquire_buffer_lock(buffer_id).await?;  // <-- ERROR"
+                        ],
+                        [
+                          1,
+                          "        let result = self.process_buffer(&lock).await;"
+                        ],
+                        [
+                          2,
+                          "        Ok(result)"
+                        ]
+                      ],
+                      "inApp": true
+                    },
+                    {
+                      "filename": "crates/collab/src/db/mod.rs",
+                      "absPath": "/app/crates/collab/src/db/mod.rs",
+                      "function": "acquire_buffer_lock",
+                      "module": "crates::collab::src::db::mod",
+                      "lineNo": 169,
+                      "colNo": 1,
+                      "context": [
+                        [
+                          -3,
+                          "    async fn process_request(&self, req: Request) -> Result<Response> {"
+                        ],
+                        [
+                          -2,
+                          "        let buffer_id = req.buffer_id();"
+                        ],
+                        [
+                          -1,
+                          "        // Check availability before acquiring"
+                        ],
+                        [
+                          0,
+                          "        let lock = self.acquire_buffer_lock(buffer_id).await?;  // <-- ERROR"
+                        ],
+                        [
+                          1,
+                          "        let result = self.process_buffer(&lock).await;"
+                        ],
+                        [
+                          2,
+                          "        Ok(result)"
+                        ]
+                      ],
+                      "inApp": true
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "breadcrumbs",
+          "data": {
+            "values": [
+              {
+                "timestamp": "2026-02-05T20:03:25.394071Z",
+                "type": "default",
+                "category": "http",
+                "message": "HTTP request received",
+                "data": {
+                  "method": "POST",
+                  "url": "/api/buffers"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:06:25.394071Z",
+                "type": "default",
+                "category": "query",
+                "message": "Database query",
+                "data": {
+                  "query": "SELECT * FROM buffers WHERE id = $1"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:10:25.394071Z",
+                "type": "default",
+                "category": "info",
+                "message": "Buffer availability check",
+                "data": {
+                  "buffer_id": "12345",
+                  "available": true
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:08:25.394071Z",
+                "type": "default",
+                "category": "debug",
+                "message": "Attempting lock acquisition",
+                "data": {
+                  "buffer_id": "12345"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:11:25.394071Z",
+                "type": "default",
+                "category": "query",
+                "message": "Database query",
+                "data": {
+                  "query": "UPDATE buffers SET locked_by = $1"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:12:25.394071Z",
+                "type": "default",
+                "category": "error",
+                "message": "Lock acquisition failed",
+                "data": {
+                  "reason": "already_locked"
+                },
+                "level": "error"
+              }
+            ]
+          }
+        },
+        {
+          "type": "request",
+          "data": {
+            "method": "POST",
+            "url": "https://api.zed.dev/v1/buffers/acquire",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer [REDACTED]"
+              ],
+              [
+                "X-Request-ID",
+                "0d9a430a-fd42-e361-bd81-f74c9ce9cb5c"
+              ]
+            ],
+            "data": {
+              "buffer_id": "12345",
+              "project_id": "67890"
+            },
+            "inferredContentType": "application/json"
+          }
+        }
+      ],
+      "errors": [],
+      "fingerprints": [
+        "efe3b6dd-8e6b-a8"
+      ],
+      "message": "WARN buffer ownership conflict detected",
+      "sdk": {
+        "name": "sentry.rust",
+        "version": "0.31.0"
+      },
+      "tags": [
+        [
+          "environment",
+          "production"
+        ],
+        [
+          "server_name",
+          "collab-5"
+        ],
+        [
+          "release",
+          "v0.120.0"
+        ],
+        [
+          "transaction",
+          "/api/buffers/acquire"
+        ],
+        [
+          "pattern_category",
+          "Distributed System Failures"
+        ]
+      ],
+      "user": {
+        "id": "18b0ff9d",
+        "email": "user433@example.com",
+        "ip_address": "192.168.131.167"
+      }
+    },
+    {
+      "eventID": "db39dd7f-31f2-ad8d-9217-925332a11195",
+      "context": {
+        "pattern_id": "RACE-001",
+        "buffer_state": {
+          "buffer_id": "12345",
+          "locked_by": null,
+          "lock_acquired_at": null
+        },
+        "request_context": {
+          "user_id": "f9595e80",
+          "project_id": "67890",
+          "concurrent_users": 7
+        }
+      },
+      "contexts": {
+        "os": {
+          "name": "Linux",
+          "version": "5.15.0"
+        },
+        "runtime": {
+          "name": "rustc",
+          "version": "1.75.0"
+        },
+        "trace": {
+          "trace_id": "cf6112a2-42ae-763a-232a-f968ed3ee453",
+          "span_id": "c98a8869-0dda-f8",
+          "op": "http.server",
+          "status": "internal_error"
+        }
+      },
+      "dateCreated": "2026-02-05T18:32:25.394071Z",
+      "dateReceived": "2026-02-05T18:29:25.394071Z",
+      "entries": [
+        {
+          "type": "exception",
+          "data": {
+            "values": [
+              {
+                "type": "ConcurrencyError",
+                "value": "WARN buffer ownership conflict detected",
+                "mechanism": {
+                  "type": "generic",
+                  "handled": false
+                },
+                "stacktrace": {
+                  "frames": [
+                    {
+                      "filename": "tokio/runtime/scheduler.rs",
+                      "function": "block_on",
+                      "inApp": false,
+                      "lineNo": 154
+                    },
+                    {
+                      "filename": "axum/routing/mod.rs",
+                      "function": "call",
+                      "inApp": false,
+                      "lineNo": 173
+                    },
+                    {
+                      "filename": "tower/service.rs",
+                      "function": "poll_ready",
+                      "inApp": false,
+                      "lineNo": 468
+                    },
+                    {
+                      "filename": "crates/collab/src/db/buffers.rs",
+                      "absPath": "/app/crates/collab/src/db/buffers.rs",
+                      "function": "acquire_buffer_lock",
+                      "module": "crates::collab::src::db::buffers",
+                      "lineNo": 70,
+                      "colNo": 15,
+                      "context": [
+                        [
+                          -3,
+                          "    async fn process_request(&self, req: Request) -> Result<Response> {"
+                        ],
+                        [
+                          -2,
+                          "        let buffer_id = req.buffer_id();"
+                        ],
+                        [
+                          -1,
+                          "        // Check availability before acquiring"
+                        ],
+                        [
+                          0,
+                          "        let lock = self.acquire_buffer_lock(buffer_id).await?;  // <-- ERROR"
+                        ],
+                        [
+                          1,
+                          "        let result = self.process_buffer(&lock).await;"
+                        ],
+                        [
+                          2,
+                          "        Ok(result)"
+                        ]
+                      ],
+                      "inApp": true
+                    },
+                    {
+                      "filename": "crates/collab/src/db/mod.rs",
+                      "absPath": "/app/crates/collab/src/db/mod.rs",
+                      "function": "acquire_buffer_lock",
+                      "module": "crates::collab::src::db::mod",
+                      "lineNo": 148,
+                      "colNo": 16,
+                      "context": [
+                        [
+                          -3,
+                          "    async fn process_request(&self, req: Request) -> Result<Response> {"
+                        ],
+                        [
+                          -2,
+                          "        let buffer_id = req.buffer_id();"
+                        ],
+                        [
+                          -1,
+                          "        // Check availability before acquiring"
+                        ],
+                        [
+                          0,
+                          "        let lock = self.acquire_buffer_lock(buffer_id).await?;  // <-- ERROR"
+                        ],
+                        [
+                          1,
+                          "        let result = self.process_buffer(&lock).await;"
+                        ],
+                        [
+                          2,
+                          "        Ok(result)"
+                        ]
+                      ],
+                      "inApp": true
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "breadcrumbs",
+          "data": {
+            "values": [
+              {
+                "timestamp": "2026-02-05T19:58:25.394071Z",
+                "type": "default",
+                "category": "http",
+                "message": "HTTP request received",
+                "data": {
+                  "method": "POST",
+                  "url": "/api/buffers"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:02:25.394071Z",
+                "type": "default",
+                "category": "query",
+                "message": "Database query",
+                "data": {
+                  "query": "SELECT * FROM buffers WHERE id = $1"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:07:25.394071Z",
+                "type": "default",
+                "category": "info",
+                "message": "Buffer availability check",
+                "data": {
+                  "buffer_id": "12345",
+                  "available": true
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:01:25.394071Z",
+                "type": "default",
+                "category": "debug",
+                "message": "Attempting lock acquisition",
+                "data": {
+                  "buffer_id": "12345"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:09:25.394071Z",
+                "type": "default",
+                "category": "query",
+                "message": "Database query",
+                "data": {
+                  "query": "UPDATE buffers SET locked_by = $1"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:10:25.394071Z",
+                "type": "default",
+                "category": "error",
+                "message": "Lock acquisition failed",
+                "data": {
+                  "reason": "already_locked"
+                },
+                "level": "error"
+              }
+            ]
+          }
+        },
+        {
+          "type": "request",
+          "data": {
+            "method": "POST",
+            "url": "https://api.zed.dev/v1/buffers/acquire",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer [REDACTED]"
+              ],
+              [
+                "X-Request-ID",
+                "2ee3df07-a000-8968-6bee-6ed62991d5a9"
+              ]
+            ],
+            "data": {
+              "buffer_id": "12345",
+              "project_id": "67890"
+            },
+            "inferredContentType": "application/json"
+          }
+        }
+      ],
+      "errors": [],
+      "fingerprints": [
+        "d3d9a2ec-8342-65"
+      ],
+      "message": "WARN buffer ownership conflict detected",
+      "sdk": {
+        "name": "sentry.rust",
+        "version": "0.31.0"
+      },
+      "tags": [
+        [
+          "environment",
+          "production"
+        ],
+        [
+          "server_name",
+          "collab-1"
+        ],
+        [
+          "release",
+          "v0.124.3"
+        ],
+        [
+          "transaction",
+          "/api/buffers/acquire"
+        ],
+        [
+          "pattern_category",
+          "Distributed System Failures"
+        ]
+      ],
+      "user": {
+        "id": "850c6a95",
+        "email": "user80@example.com",
+        "ip_address": "192.168.122.53"
+      }
+    },
+    {
+      "eventID": "d2089072-6296-31c4-4404-a41de21b1d81",
+      "context": {
+        "pattern_id": "RACE-001",
+        "buffer_state": {
+          "buffer_id": "12345",
+          "locked_by": null,
+          "lock_acquired_at": null
+        },
+        "request_context": {
+          "user_id": "610585e3",
+          "project_id": "67890",
+          "concurrent_users": 2
+        }
+      },
+      "contexts": {
+        "os": {
+          "name": "Linux",
+          "version": "5.15.0"
+        },
+        "runtime": {
+          "name": "rustc",
+          "version": "1.75.0"
+        },
+        "trace": {
+          "trace_id": "3d6c2a75-3333-8fed-0930-80034801e1d7",
+          "span_id": "4ab276eb-6015-6e",
+          "op": "http.server",
+          "status": "internal_error"
+        }
+      },
+      "dateCreated": "2026-02-05T18:37:25.394071Z",
+      "dateReceived": "2026-02-05T18:42:25.394071Z",
+      "entries": [
+        {
+          "type": "exception",
+          "data": {
+            "values": [
+              {
+                "type": "ConcurrencyError",
+                "value": "WARN buffer ownership conflict detected",
+                "mechanism": {
+                  "type": "generic",
+                  "handled": false
+                },
+                "stacktrace": {
+                  "frames": [
+                    {
+                      "filename": "tokio/runtime/scheduler.rs",
+                      "function": "block_on",
+                      "inApp": false,
+                      "lineNo": 177
+                    },
+                    {
+                      "filename": "axum/routing/mod.rs",
+                      "function": "call",
+                      "inApp": false,
+                      "lineNo": 242
+                    },
+                    {
+                      "filename": "tower/service.rs",
+                      "function": "poll_ready",
+                      "inApp": false,
+                      "lineNo": 405
+                    },
+                    {
+                      "filename": "crates/collab/src/db/buffers.rs",
+                      "absPath": "/app/crates/collab/src/db/buffers.rs",
+                      "function": "acquire_buffer_lock",
+                      "module": "crates::collab::src::db::buffers",
+                      "lineNo": 199,
+                      "colNo": 36,
+                      "context": [
+                        [
+                          -3,
+                          "    async fn process_request(&self, req: Request) -> Result<Response> {"
+                        ],
+                        [
+                          -2,
+                          "        let buffer_id = req.buffer_id();"
+                        ],
+                        [
+                          -1,
+                          "        // Check availability before acquiring"
+                        ],
+                        [
+                          0,
+                          "        let lock = self.acquire_buffer_lock(buffer_id).await?;  // <-- ERROR"
+                        ],
+                        [
+                          1,
+                          "        let result = self.process_buffer(&lock).await;"
+                        ],
+                        [
+                          2,
+                          "        Ok(result)"
+                        ]
+                      ],
+                      "inApp": true
+                    },
+                    {
+                      "filename": "crates/collab/src/db/mod.rs",
+                      "absPath": "/app/crates/collab/src/db/mod.rs",
+                      "function": "acquire_buffer_lock",
+                      "module": "crates::collab::src::db::mod",
+                      "lineNo": 184,
+                      "colNo": 6,
+                      "context": [
+                        [
+                          -3,
+                          "    async fn process_request(&self, req: Request) -> Result<Response> {"
+                        ],
+                        [
+                          -2,
+                          "        let buffer_id = req.buffer_id();"
+                        ],
+                        [
+                          -1,
+                          "        // Check availability before acquiring"
+                        ],
+                        [
+                          0,
+                          "        let lock = self.acquire_buffer_lock(buffer_id).await?;  // <-- ERROR"
+                        ],
+                        [
+                          1,
+                          "        let result = self.process_buffer(&lock).await;"
+                        ],
+                        [
+                          2,
+                          "        Ok(result)"
+                        ]
+                      ],
+                      "inApp": true
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "breadcrumbs",
+          "data": {
+            "values": [
+              {
+                "timestamp": "2026-02-05T20:02:25.394071Z",
+                "type": "default",
+                "category": "http",
+                "message": "HTTP request received",
+                "data": {
+                  "method": "POST",
+                  "url": "/api/buffers"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:05:25.394071Z",
+                "type": "default",
+                "category": "query",
+                "message": "Database query",
+                "data": {
+                  "query": "SELECT * FROM buffers WHERE id = $1"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:05:25.394071Z",
+                "type": "default",
+                "category": "info",
+                "message": "Buffer availability check",
+                "data": {
+                  "buffer_id": "12345",
+                  "available": true
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:08:25.394071Z",
+                "type": "default",
+                "category": "debug",
+                "message": "Attempting lock acquisition",
+                "data": {
+                  "buffer_id": "12345"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:10:25.394071Z",
+                "type": "default",
+                "category": "query",
+                "message": "Database query",
+                "data": {
+                  "query": "UPDATE buffers SET locked_by = $1"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:06:25.394071Z",
+                "type": "default",
+                "category": "error",
+                "message": "Lock acquisition failed",
+                "data": {
+                  "reason": "already_locked"
+                },
+                "level": "error"
+              }
+            ]
+          }
+        },
+        {
+          "type": "request",
+          "data": {
+            "method": "POST",
+            "url": "https://api.zed.dev/v1/buffers/acquire",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer [REDACTED]"
+              ],
+              [
+                "X-Request-ID",
+                "f62a56e3-8aa6-8f55-0ff1-90ea25bed2b2"
+              ]
+            ],
+            "data": {
+              "buffer_id": "12345",
+              "project_id": "67890"
+            },
+            "inferredContentType": "application/json"
+          }
+        }
+      ],
+      "errors": [],
+      "fingerprints": [
+        "8025c761-e5ce-fd"
+      ],
+      "message": "WARN buffer ownership conflict detected",
+      "sdk": {
+        "name": "sentry.rust",
+        "version": "0.31.0"
+      },
+      "tags": [
+        [
+          "environment",
+          "production"
+        ],
+        [
+          "server_name",
+          "collab-1"
+        ],
+        [
+          "release",
+          "v0.123.3"
+        ],
+        [
+          "transaction",
+          "/api/buffers/acquire"
+        ],
+        [
+          "pattern_category",
+          "Distributed System Failures"
+        ]
+      ],
+      "user": {
+        "id": "b41b9afc",
+        "email": "user22@example.com",
+        "ip_address": "192.168.50.103"
+      }
+    },
+    {
+      "eventID": "ff90dc65-a4fd-6669-29d7-3586af06f618",
+      "context": {
+        "pattern_id": "RACE-001",
+        "buffer_state": {
+          "buffer_id": "12345",
+          "locked_by": null,
+          "lock_acquired_at": null
+        },
+        "request_context": {
+          "user_id": "37bda26c",
+          "project_id": "67890",
+          "concurrent_users": 10
+        }
+      },
+      "contexts": {
+        "os": {
+          "name": "Linux",
+          "version": "5.15.0"
+        },
+        "runtime": {
+          "name": "rustc",
+          "version": "1.75.0"
+        },
+        "trace": {
+          "trace_id": "bec388ef-a0ae-cf84-1b0a-1cc2ca8623d9",
+          "span_id": "c37a7051-9884-46",
+          "op": "http.server",
+          "status": "internal_error"
+        }
+      },
+      "dateCreated": "2026-02-05T18:52:25.394071Z",
+      "dateReceived": "2026-02-05T18:49:25.394071Z",
+      "entries": [
+        {
+          "type": "exception",
+          "data": {
+            "values": [
+              {
+                "type": "ConcurrencyError",
+                "value": "WARN buffer ownership conflict detected",
+                "mechanism": {
+                  "type": "generic",
+                  "handled": false
+                },
+                "stacktrace": {
+                  "frames": [
+                    {
+                      "filename": "tokio/runtime/scheduler.rs",
+                      "function": "block_on",
+                      "inApp": false,
+                      "lineNo": 169
+                    },
+                    {
+                      "filename": "axum/routing/mod.rs",
+                      "function": "call",
+                      "inApp": false,
+                      "lineNo": 109
+                    },
+                    {
+                      "filename": "tower/service.rs",
+                      "function": "poll_ready",
+                      "inApp": false,
+                      "lineNo": 97
+                    },
+                    {
+                      "filename": "crates/collab/src/db/buffers.rs",
+                      "absPath": "/app/crates/collab/src/db/buffers.rs",
+                      "function": "acquire_buffer_lock",
+                      "module": "crates::collab::src::db::buffers",
+                      "lineNo": 87,
+                      "colNo": 8,
+                      "context": [
+                        [
+                          -3,
+                          "    async fn process_request(&self, req: Request) -> Result<Response> {"
+                        ],
+                        [
+                          -2,
+                          "        let buffer_id = req.buffer_id();"
+                        ],
+                        [
+                          -1,
+                          "        // Check availability before acquiring"
+                        ],
+                        [
+                          0,
+                          "        let lock = self.acquire_buffer_lock(buffer_id).await?;  // <-- ERROR"
+                        ],
+                        [
+                          1,
+                          "        let result = self.process_buffer(&lock).await;"
+                        ],
+                        [
+                          2,
+                          "        Ok(result)"
+                        ]
+                      ],
+                      "inApp": true
+                    },
+                    {
+                      "filename": "crates/collab/src/db/mod.rs",
+                      "absPath": "/app/crates/collab/src/db/mod.rs",
+                      "function": "acquire_buffer_lock",
+                      "module": "crates::collab::src::db::mod",
+                      "lineNo": 79,
+                      "colNo": 26,
+                      "context": [
+                        [
+                          -3,
+                          "    async fn process_request(&self, req: Request) -> Result<Response> {"
+                        ],
+                        [
+                          -2,
+                          "        let buffer_id = req.buffer_id();"
+                        ],
+                        [
+                          -1,
+                          "        // Check availability before acquiring"
+                        ],
+                        [
+                          0,
+                          "        let lock = self.acquire_buffer_lock(buffer_id).await?;  // <-- ERROR"
+                        ],
+                        [
+                          1,
+                          "        let result = self.process_buffer(&lock).await;"
+                        ],
+                        [
+                          2,
+                          "        Ok(result)"
+                        ]
+                      ],
+                      "inApp": true
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "breadcrumbs",
+          "data": {
+            "values": [
+              {
+                "timestamp": "2026-02-05T20:01:25.394071Z",
+                "type": "default",
+                "category": "http",
+                "message": "HTTP request received",
+                "data": {
+                  "method": "POST",
+                  "url": "/api/buffers"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T19:59:25.394071Z",
+                "type": "default",
+                "category": "query",
+                "message": "Database query",
+                "data": {
+                  "query": "SELECT * FROM buffers WHERE id = $1"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:02:25.394071Z",
+                "type": "default",
+                "category": "info",
+                "message": "Buffer availability check",
+                "data": {
+                  "buffer_id": "12345",
+                  "available": true
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:02:25.394071Z",
+                "type": "default",
+                "category": "debug",
+                "message": "Attempting lock acquisition",
+                "data": {
+                  "buffer_id": "12345"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:02:25.394071Z",
+                "type": "default",
+                "category": "query",
+                "message": "Database query",
+                "data": {
+                  "query": "UPDATE buffers SET locked_by = $1"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:13:25.394071Z",
+                "type": "default",
+                "category": "error",
+                "message": "Lock acquisition failed",
+                "data": {
+                  "reason": "already_locked"
+                },
+                "level": "error"
+              }
+            ]
+          }
+        },
+        {
+          "type": "request",
+          "data": {
+            "method": "POST",
+            "url": "https://api.zed.dev/v1/buffers/acquire",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer [REDACTED]"
+              ],
+              [
+                "X-Request-ID",
+                "cf2e92fe-dc85-41af-fc46-91a7e9e40392"
+              ]
+            ],
+            "data": {
+              "buffer_id": "12345",
+              "project_id": "67890"
+            },
+            "inferredContentType": "application/json"
+          }
+        }
+      ],
+      "errors": [],
+      "fingerprints": [
+        "030ed2b2-5066-9a"
+      ],
+      "message": "WARN buffer ownership conflict detected",
+      "sdk": {
+        "name": "sentry.rust",
+        "version": "0.31.0"
+      },
+      "tags": [
+        [
+          "environment",
+          "production"
+        ],
+        [
+          "server_name",
+          "collab-1"
+        ],
+        [
+          "release",
+          "v0.125.5"
+        ],
+        [
+          "transaction",
+          "/api/buffers/acquire"
+        ],
+        [
+          "pattern_category",
+          "Distributed System Failures"
+        ]
+      ],
+      "user": {
+        "id": "abbb8ccb",
+        "email": "user184@example.com",
+        "ip_address": "192.168.185.22"
+      }
+    },
+    {
+      "eventID": "cfa70d0c-45e9-c99a-61a1-09991c32ee62",
+      "context": {
+        "pattern_id": "RACE-001",
+        "buffer_state": {
+          "buffer_id": "12345",
+          "locked_by": null,
+          "lock_acquired_at": null
+        },
+        "request_context": {
+          "user_id": "25f65294",
+          "project_id": "67890",
+          "concurrent_users": 8
+        }
+      },
+      "contexts": {
+        "os": {
+          "name": "Linux",
+          "version": "5.15.0"
+        },
+        "runtime": {
+          "name": "rustc",
+          "version": "1.75.0"
+        },
+        "trace": {
+          "trace_id": "a723cb9b-84c8-1cc8-bbfb-c4aa70521df7",
+          "span_id": "85402384-ae2d-92",
+          "op": "http.server",
+          "status": "internal_error"
+        }
+      },
+      "dateCreated": "2026-02-05T19:01:25.394071Z",
+      "dateReceived": "2026-02-05T18:58:25.394071Z",
+      "entries": [
+        {
+          "type": "exception",
+          "data": {
+            "values": [
+              {
+                "type": "ConcurrencyError",
+                "value": "WARN buffer ownership conflict detected",
+                "mechanism": {
+                  "type": "generic",
+                  "handled": false
+                },
+                "stacktrace": {
+                  "frames": [
+                    {
+                      "filename": "tokio/runtime/scheduler.rs",
+                      "function": "block_on",
+                      "inApp": false,
+                      "lineNo": 456
+                    },
+                    {
+                      "filename": "axum/routing/mod.rs",
+                      "function": "call",
+                      "inApp": false,
+                      "lineNo": 410
+                    },
+                    {
+                      "filename": "tower/service.rs",
+                      "function": "poll_ready",
+                      "inApp": false,
+                      "lineNo": 314
+                    },
+                    {
+                      "filename": "crates/collab/src/db/buffers.rs",
+                      "absPath": "/app/crates/collab/src/db/buffers.rs",
+                      "function": "acquire_buffer_lock",
+                      "module": "crates::collab::src::db::buffers",
+                      "lineNo": 96,
+                      "colNo": 39,
+                      "context": [
+                        [
+                          -3,
+                          "    async fn process_request(&self, req: Request) -> Result<Response> {"
+                        ],
+                        [
+                          -2,
+                          "        let buffer_id = req.buffer_id();"
+                        ],
+                        [
+                          -1,
+                          "        // Check availability before acquiring"
+                        ],
+                        [
+                          0,
+                          "        let lock = self.acquire_buffer_lock(buffer_id).await?;  // <-- ERROR"
+                        ],
+                        [
+                          1,
+                          "        let result = self.process_buffer(&lock).await;"
+                        ],
+                        [
+                          2,
+                          "        Ok(result)"
+                        ]
+                      ],
+                      "inApp": true
+                    },
+                    {
+                      "filename": "crates/collab/src/db/mod.rs",
+                      "absPath": "/app/crates/collab/src/db/mod.rs",
+                      "function": "acquire_buffer_lock",
+                      "module": "crates::collab::src::db::mod",
+                      "lineNo": 32,
+                      "colNo": 25,
+                      "context": [
+                        [
+                          -3,
+                          "    async fn process_request(&self, req: Request) -> Result<Response> {"
+                        ],
+                        [
+                          -2,
+                          "        let buffer_id = req.buffer_id();"
+                        ],
+                        [
+                          -1,
+                          "        // Check availability before acquiring"
+                        ],
+                        [
+                          0,
+                          "        let lock = self.acquire_buffer_lock(buffer_id).await?;  // <-- ERROR"
+                        ],
+                        [
+                          1,
+                          "        let result = self.process_buffer(&lock).await;"
+                        ],
+                        [
+                          2,
+                          "        Ok(result)"
+                        ]
+                      ],
+                      "inApp": true
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "breadcrumbs",
+          "data": {
+            "values": [
+              {
+                "timestamp": "2026-02-05T20:00:25.394071Z",
+                "type": "default",
+                "category": "http",
+                "message": "HTTP request received",
+                "data": {
+                  "method": "POST",
+                  "url": "/api/buffers"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:07:25.394071Z",
+                "type": "default",
+                "category": "query",
+                "message": "Database query",
+                "data": {
+                  "query": "SELECT * FROM buffers WHERE id = $1"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:08:25.394071Z",
+                "type": "default",
+                "category": "info",
+                "message": "Buffer availability check",
+                "data": {
+                  "buffer_id": "12345",
+                  "available": true
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:05:25.394071Z",
+                "type": "default",
+                "category": "debug",
+                "message": "Attempting lock acquisition",
+                "data": {
+                  "buffer_id": "12345"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:05:25.394071Z",
+                "type": "default",
+                "category": "query",
+                "message": "Database query",
+                "data": {
+                  "query": "UPDATE buffers SET locked_by = $1"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:12:25.394071Z",
+                "type": "default",
+                "category": "error",
+                "message": "Lock acquisition failed",
+                "data": {
+                  "reason": "already_locked"
+                },
+                "level": "error"
+              }
+            ]
+          }
+        },
+        {
+          "type": "request",
+          "data": {
+            "method": "POST",
+            "url": "https://api.zed.dev/v1/buffers/acquire",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer [REDACTED]"
+              ],
+              [
+                "X-Request-ID",
+                "8ace8b89-e627-0a19-ac80-e52b1c1ddce8"
+              ]
+            ],
+            "data": {
+              "buffer_id": "12345",
+              "project_id": "67890"
+            },
+            "inferredContentType": "application/json"
+          }
+        }
+      ],
+      "errors": [],
+      "fingerprints": [
+        "062de607-997c-0b"
+      ],
+      "message": "WARN buffer ownership conflict detected",
+      "sdk": {
+        "name": "sentry.rust",
+        "version": "0.31.0"
+      },
+      "tags": [
+        [
+          "environment",
+          "production"
+        ],
+        [
+          "server_name",
+          "collab-4"
+        ],
+        [
+          "release",
+          "v0.126.6"
+        ],
+        [
+          "transaction",
+          "/api/buffers/acquire"
+        ],
+        [
+          "pattern_category",
+          "Distributed System Failures"
+        ]
+      ],
+      "user": {
+        "id": "39bd3c41",
+        "email": "user66@example.com",
+        "ip_address": "192.168.60.17"
+      }
+    },
+    {
+      "eventID": "f2a15be8-0578-fbfe-8b97-ab8e22ec8e9e",
+      "context": {
+        "pattern_id": "RACE-001",
+        "buffer_state": {
+          "buffer_id": "12345",
+          "locked_by": null,
+          "lock_acquired_at": null
+        },
+        "request_context": {
+          "user_id": "6e4fbca2",
+          "project_id": "67890",
+          "concurrent_users": 3
+        }
+      },
+      "contexts": {
+        "os": {
+          "name": "Linux",
+          "version": "5.15.0"
+        },
+        "runtime": {
+          "name": "rustc",
+          "version": "1.75.0"
+        },
+        "trace": {
+          "trace_id": "7f4ee3da-4df1-22a1-34c7-362a5d849f8a",
+          "span_id": "16df06f8-e7dd-8c",
+          "op": "http.server",
+          "status": "internal_error"
+        }
+      },
+      "dateCreated": "2026-02-05T19:08:25.394071Z",
+      "dateReceived": "2026-02-05T19:03:25.394071Z",
+      "entries": [
+        {
+          "type": "exception",
+          "data": {
+            "values": [
+              {
+                "type": "ConcurrencyError",
+                "value": "WARN buffer ownership conflict detected",
+                "mechanism": {
+                  "type": "generic",
+                  "handled": false
+                },
+                "stacktrace": {
+                  "frames": [
+                    {
+                      "filename": "tokio/runtime/scheduler.rs",
+                      "function": "block_on",
+                      "inApp": false,
+                      "lineNo": 409
+                    },
+                    {
+                      "filename": "axum/routing/mod.rs",
+                      "function": "call",
+                      "inApp": false,
+                      "lineNo": 199
+                    },
+                    {
+                      "filename": "tower/service.rs",
+                      "function": "poll_ready",
+                      "inApp": false,
+                      "lineNo": 62
+                    },
+                    {
+                      "filename": "crates/collab/src/db/buffers.rs",
+                      "absPath": "/app/crates/collab/src/db/buffers.rs",
+                      "function": "acquire_buffer_lock",
+                      "module": "crates::collab::src::db::buffers",
+                      "lineNo": 54,
+                      "colNo": 35,
+                      "context": [
+                        [
+                          -3,
+                          "    async fn process_request(&self, req: Request) -> Result<Response> {"
+                        ],
+                        [
+                          -2,
+                          "        let buffer_id = req.buffer_id();"
+                        ],
+                        [
+                          -1,
+                          "        // Check availability before acquiring"
+                        ],
+                        [
+                          0,
+                          "        let lock = self.acquire_buffer_lock(buffer_id).await?;  // <-- ERROR"
+                        ],
+                        [
+                          1,
+                          "        let result = self.process_buffer(&lock).await;"
+                        ],
+                        [
+                          2,
+                          "        Ok(result)"
+                        ]
+                      ],
+                      "inApp": true
+                    },
+                    {
+                      "filename": "crates/collab/src/db/mod.rs",
+                      "absPath": "/app/crates/collab/src/db/mod.rs",
+                      "function": "acquire_buffer_lock",
+                      "module": "crates::collab::src::db::mod",
+                      "lineNo": 62,
+                      "colNo": 12,
+                      "context": [
+                        [
+                          -3,
+                          "    async fn process_request(&self, req: Request) -> Result<Response> {"
+                        ],
+                        [
+                          -2,
+                          "        let buffer_id = req.buffer_id();"
+                        ],
+                        [
+                          -1,
+                          "        // Check availability before acquiring"
+                        ],
+                        [
+                          0,
+                          "        let lock = self.acquire_buffer_lock(buffer_id).await?;  // <-- ERROR"
+                        ],
+                        [
+                          1,
+                          "        let result = self.process_buffer(&lock).await;"
+                        ],
+                        [
+                          2,
+                          "        Ok(result)"
+                        ]
+                      ],
+                      "inApp": true
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "breadcrumbs",
+          "data": {
+            "values": [
+              {
+                "timestamp": "2026-02-05T20:06:25.394071Z",
+                "type": "default",
+                "category": "http",
+                "message": "HTTP request received",
+                "data": {
+                  "method": "POST",
+                  "url": "/api/buffers"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:02:25.394071Z",
+                "type": "default",
+                "category": "query",
+                "message": "Database query",
+                "data": {
+                  "query": "SELECT * FROM buffers WHERE id = $1"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:05:25.394071Z",
+                "type": "default",
+                "category": "info",
+                "message": "Buffer availability check",
+                "data": {
+                  "buffer_id": "12345",
+                  "available": true
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:09:25.394071Z",
+                "type": "default",
+                "category": "debug",
+                "message": "Attempting lock acquisition",
+                "data": {
+                  "buffer_id": "12345"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:09:25.394071Z",
+                "type": "default",
+                "category": "query",
+                "message": "Database query",
+                "data": {
+                  "query": "UPDATE buffers SET locked_by = $1"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:04:25.394071Z",
+                "type": "default",
+                "category": "error",
+                "message": "Lock acquisition failed",
+                "data": {
+                  "reason": "already_locked"
+                },
+                "level": "error"
+              }
+            ]
+          }
+        },
+        {
+          "type": "request",
+          "data": {
+            "method": "POST",
+            "url": "https://api.zed.dev/v1/buffers/acquire",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer [REDACTED]"
+              ],
+              [
+                "X-Request-ID",
+                "dc0bcc45-9b28-e43e-5cfd-592e4a0726ec"
+              ]
+            ],
+            "data": {
+              "buffer_id": "12345",
+              "project_id": "67890"
+            },
+            "inferredContentType": "application/json"
+          }
+        }
+      ],
+      "errors": [],
+      "fingerprints": [
+        "0cc6c6f0-4457-b1"
+      ],
+      "message": "WARN buffer ownership conflict detected",
+      "sdk": {
+        "name": "sentry.rust",
+        "version": "0.31.0"
+      },
+      "tags": [
+        [
+          "environment",
+          "production"
+        ],
+        [
+          "server_name",
+          "collab-2"
+        ],
+        [
+          "release",
+          "v0.130.9"
+        ],
+        [
+          "transaction",
+          "/api/buffers/acquire"
+        ],
+        [
+          "pattern_category",
+          "Distributed System Failures"
+        ]
+      ],
+      "user": {
+        "id": "9a581853",
+        "email": "user653@example.com",
+        "ip_address": "192.168.195.108"
+      }
+    },
+    {
+      "eventID": "043288ba-e174-71be-db70-4d0fde8ae389",
+      "context": {
+        "pattern_id": "RACE-001",
+        "buffer_state": {
+          "buffer_id": "12345",
+          "locked_by": null,
+          "lock_acquired_at": null
+        },
+        "request_context": {
+          "user_id": "27e2896c",
+          "project_id": "67890",
+          "concurrent_users": 5
+        }
+      },
+      "contexts": {
+        "os": {
+          "name": "Linux",
+          "version": "5.15.0"
+        },
+        "runtime": {
+          "name": "rustc",
+          "version": "1.75.0"
+        },
+        "trace": {
+          "trace_id": "c678ef69-dad1-2703-93cb-d9fef84a320a",
+          "span_id": "69c2d3fd-c3c6-67",
+          "op": "http.server",
+          "status": "internal_error"
+        }
+      },
+      "dateCreated": "2026-02-05T19:16:25.394071Z",
+      "dateReceived": "2026-02-05T19:15:25.394071Z",
+      "entries": [
+        {
+          "type": "exception",
+          "data": {
+            "values": [
+              {
+                "type": "ConcurrencyError",
+                "value": "WARN buffer ownership conflict detected",
+                "mechanism": {
+                  "type": "generic",
+                  "handled": false
+                },
+                "stacktrace": {
+                  "frames": [
+                    {
+                      "filename": "tokio/runtime/scheduler.rs",
+                      "function": "block_on",
+                      "inApp": false,
+                      "lineNo": 342
+                    },
+                    {
+                      "filename": "axum/routing/mod.rs",
+                      "function": "call",
+                      "inApp": false,
+                      "lineNo": 225
+                    },
+                    {
+                      "filename": "tower/service.rs",
+                      "function": "poll_ready",
+                      "inApp": false,
+                      "lineNo": 387
+                    },
+                    {
+                      "filename": "crates/collab/src/db/buffers.rs",
+                      "absPath": "/app/crates/collab/src/db/buffers.rs",
+                      "function": "acquire_buffer_lock",
+                      "module": "crates::collab::src::db::buffers",
+                      "lineNo": 172,
+                      "colNo": 35,
+                      "context": [
+                        [
+                          -3,
+                          "    async fn process_request(&self, req: Request) -> Result<Response> {"
+                        ],
+                        [
+                          -2,
+                          "        let buffer_id = req.buffer_id();"
+                        ],
+                        [
+                          -1,
+                          "        // Check availability before acquiring"
+                        ],
+                        [
+                          0,
+                          "        let lock = self.acquire_buffer_lock(buffer_id).await?;  // <-- ERROR"
+                        ],
+                        [
+                          1,
+                          "        let result = self.process_buffer(&lock).await;"
+                        ],
+                        [
+                          2,
+                          "        Ok(result)"
+                        ]
+                      ],
+                      "inApp": true
+                    },
+                    {
+                      "filename": "crates/collab/src/db/mod.rs",
+                      "absPath": "/app/crates/collab/src/db/mod.rs",
+                      "function": "acquire_buffer_lock",
+                      "module": "crates::collab::src::db::mod",
+                      "lineNo": 186,
+                      "colNo": 27,
+                      "context": [
+                        [
+                          -3,
+                          "    async fn process_request(&self, req: Request) -> Result<Response> {"
+                        ],
+                        [
+                          -2,
+                          "        let buffer_id = req.buffer_id();"
+                        ],
+                        [
+                          -1,
+                          "        // Check availability before acquiring"
+                        ],
+                        [
+                          0,
+                          "        let lock = self.acquire_buffer_lock(buffer_id).await?;  // <-- ERROR"
+                        ],
+                        [
+                          1,
+                          "        let result = self.process_buffer(&lock).await;"
+                        ],
+                        [
+                          2,
+                          "        Ok(result)"
+                        ]
+                      ],
+                      "inApp": true
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "breadcrumbs",
+          "data": {
+            "values": [
+              {
+                "timestamp": "2026-02-05T20:01:25.394071Z",
+                "type": "default",
+                "category": "http",
+                "message": "HTTP request received",
+                "data": {
+                  "method": "POST",
+                  "url": "/api/buffers"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:02:25.394071Z",
+                "type": "default",
+                "category": "query",
+                "message": "Database query",
+                "data": {
+                  "query": "SELECT * FROM buffers WHERE id = $1"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:01:25.394071Z",
+                "type": "default",
+                "category": "info",
+                "message": "Buffer availability check",
+                "data": {
+                  "buffer_id": "12345",
+                  "available": true
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:02:25.394071Z",
+                "type": "default",
+                "category": "debug",
+                "message": "Attempting lock acquisition",
+                "data": {
+                  "buffer_id": "12345"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:11:25.394071Z",
+                "type": "default",
+                "category": "query",
+                "message": "Database query",
+                "data": {
+                  "query": "UPDATE buffers SET locked_by = $1"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:13:25.394071Z",
+                "type": "default",
+                "category": "error",
+                "message": "Lock acquisition failed",
+                "data": {
+                  "reason": "already_locked"
+                },
+                "level": "error"
+              }
+            ]
+          }
+        },
+        {
+          "type": "request",
+          "data": {
+            "method": "POST",
+            "url": "https://api.zed.dev/v1/buffers/acquire",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer [REDACTED]"
+              ],
+              [
+                "X-Request-ID",
+                "f92eee63-cc7a-a5f2-6167-1a5144b0d0f8"
+              ]
+            ],
+            "data": {
+              "buffer_id": "12345",
+              "project_id": "67890"
+            },
+            "inferredContentType": "application/json"
+          }
+        }
+      ],
+      "errors": [],
+      "fingerprints": [
+        "5309dd11-ff76-be"
+      ],
+      "message": "WARN buffer ownership conflict detected",
+      "sdk": {
+        "name": "sentry.rust",
+        "version": "0.31.0"
+      },
+      "tags": [
+        [
+          "environment",
+          "production"
+        ],
+        [
+          "server_name",
+          "collab-3"
+        ],
+        [
+          "release",
+          "v0.121.7"
+        ],
+        [
+          "transaction",
+          "/api/buffers/acquire"
+        ],
+        [
+          "pattern_category",
+          "Distributed System Failures"
+        ]
+      ],
+      "user": {
+        "id": "a9437ead",
+        "email": "user166@example.com",
+        "ip_address": "192.168.127.71"
+      }
+    },
+    {
+      "eventID": "05ac2e0c-2bea-5efc-cf63-7078da71035a",
+      "context": {
+        "pattern_id": "RACE-001",
+        "buffer_state": {
+          "buffer_id": "12345",
+          "locked_by": null,
+          "lock_acquired_at": null
+        },
+        "request_context": {
+          "user_id": "945088ba",
+          "project_id": "67890",
+          "concurrent_users": 3
+        }
+      },
+      "contexts": {
+        "os": {
+          "name": "Linux",
+          "version": "5.15.0"
+        },
+        "runtime": {
+          "name": "rustc",
+          "version": "1.75.0"
+        },
+        "trace": {
+          "trace_id": "9280d399-f507-4666-7c47-31491c4648aa",
+          "span_id": "7e4f6041-aa49-85",
+          "op": "http.server",
+          "status": "internal_error"
+        }
+      },
+      "dateCreated": "2026-02-05T19:26:25.394071Z",
+      "dateReceived": "2026-02-05T19:26:25.394071Z",
+      "entries": [
+        {
+          "type": "exception",
+          "data": {
+            "values": [
+              {
+                "type": "ConcurrencyError",
+                "value": "WARN buffer ownership conflict detected",
+                "mechanism": {
+                  "type": "generic",
+                  "handled": false
+                },
+                "stacktrace": {
+                  "frames": [
+                    {
+                      "filename": "tokio/runtime/scheduler.rs",
+                      "function": "block_on",
+                      "inApp": false,
+                      "lineNo": 481
+                    },
+                    {
+                      "filename": "axum/routing/mod.rs",
+                      "function": "call",
+                      "inApp": false,
+                      "lineNo": 431
+                    },
+                    {
+                      "filename": "tower/service.rs",
+                      "function": "poll_ready",
+                      "inApp": false,
+                      "lineNo": 480
+                    },
+                    {
+                      "filename": "crates/collab/src/db/buffers.rs",
+                      "absPath": "/app/crates/collab/src/db/buffers.rs",
+                      "function": "acquire_buffer_lock",
+                      "module": "crates::collab::src::db::buffers",
+                      "lineNo": 133,
+                      "colNo": 27,
+                      "context": [
+                        [
+                          -3,
+                          "    async fn process_request(&self, req: Request) -> Result<Response> {"
+                        ],
+                        [
+                          -2,
+                          "        let buffer_id = req.buffer_id();"
+                        ],
+                        [
+                          -1,
+                          "        // Check availability before acquiring"
+                        ],
+                        [
+                          0,
+                          "        let lock = self.acquire_buffer_lock(buffer_id).await?;  // <-- ERROR"
+                        ],
+                        [
+                          1,
+                          "        let result = self.process_buffer(&lock).await;"
+                        ],
+                        [
+                          2,
+                          "        Ok(result)"
+                        ]
+                      ],
+                      "inApp": true
+                    },
+                    {
+                      "filename": "crates/collab/src/db/mod.rs",
+                      "absPath": "/app/crates/collab/src/db/mod.rs",
+                      "function": "acquire_buffer_lock",
+                      "module": "crates::collab::src::db::mod",
+                      "lineNo": 194,
+                      "colNo": 10,
+                      "context": [
+                        [
+                          -3,
+                          "    async fn process_request(&self, req: Request) -> Result<Response> {"
+                        ],
+                        [
+                          -2,
+                          "        let buffer_id = req.buffer_id();"
+                        ],
+                        [
+                          -1,
+                          "        // Check availability before acquiring"
+                        ],
+                        [
+                          0,
+                          "        let lock = self.acquire_buffer_lock(buffer_id).await?;  // <-- ERROR"
+                        ],
+                        [
+                          1,
+                          "        let result = self.process_buffer(&lock).await;"
+                        ],
+                        [
+                          2,
+                          "        Ok(result)"
+                        ]
+                      ],
+                      "inApp": true
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "breadcrumbs",
+          "data": {
+            "values": [
+              {
+                "timestamp": "2026-02-05T20:07:25.394071Z",
+                "type": "default",
+                "category": "http",
+                "message": "HTTP request received",
+                "data": {
+                  "method": "POST",
+                  "url": "/api/buffers"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:09:25.394071Z",
+                "type": "default",
+                "category": "query",
+                "message": "Database query",
+                "data": {
+                  "query": "SELECT * FROM buffers WHERE id = $1"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:07:25.394071Z",
+                "type": "default",
+                "category": "info",
+                "message": "Buffer availability check",
+                "data": {
+                  "buffer_id": "12345",
+                  "available": true
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:11:25.394071Z",
+                "type": "default",
+                "category": "debug",
+                "message": "Attempting lock acquisition",
+                "data": {
+                  "buffer_id": "12345"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:04:25.394071Z",
+                "type": "default",
+                "category": "query",
+                "message": "Database query",
+                "data": {
+                  "query": "UPDATE buffers SET locked_by = $1"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:13:25.394071Z",
+                "type": "default",
+                "category": "error",
+                "message": "Lock acquisition failed",
+                "data": {
+                  "reason": "already_locked"
+                },
+                "level": "error"
+              }
+            ]
+          }
+        },
+        {
+          "type": "request",
+          "data": {
+            "method": "POST",
+            "url": "https://api.zed.dev/v1/buffers/acquire",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer [REDACTED]"
+              ],
+              [
+                "X-Request-ID",
+                "28f09f50-6968-d72e-e901-d9effa61f708"
+              ]
+            ],
+            "data": {
+              "buffer_id": "12345",
+              "project_id": "67890"
+            },
+            "inferredContentType": "application/json"
+          }
+        }
+      ],
+      "errors": [],
+      "fingerprints": [
+        "76b26162-a2f2-a6"
+      ],
+      "message": "WARN buffer ownership conflict detected",
+      "sdk": {
+        "name": "sentry.rust",
+        "version": "0.31.0"
+      },
+      "tags": [
+        [
+          "environment",
+          "production"
+        ],
+        [
+          "server_name",
+          "collab-3"
+        ],
+        [
+          "release",
+          "v0.125.3"
+        ],
+        [
+          "transaction",
+          "/api/buffers/acquire"
+        ],
+        [
+          "pattern_category",
+          "Distributed System Failures"
+        ]
+      ],
+      "user": {
+        "id": "7342f1ee",
+        "email": "user665@example.com",
+        "ip_address": "192.168.224.23"
+      }
+    },
+    {
+      "eventID": "cf317a39-0a3d-a905-5357-c506b7f05d68",
+      "context": {
+        "pattern_id": "RACE-001",
+        "buffer_state": {
+          "buffer_id": "12345",
+          "locked_by": null,
+          "lock_acquired_at": null
+        },
+        "request_context": {
+          "user_id": "5484cfa7",
+          "project_id": "67890",
+          "concurrent_users": 10
+        }
+      },
+      "contexts": {
+        "os": {
+          "name": "Linux",
+          "version": "5.15.0"
+        },
+        "runtime": {
+          "name": "rustc",
+          "version": "1.75.0"
+        },
+        "trace": {
+          "trace_id": "711a9ff1-6e76-77dd-9ed5-be0cecbe6492",
+          "span_id": "960c4610-735e-a4",
+          "op": "http.server",
+          "status": "internal_error"
+        }
+      },
+      "dateCreated": "2026-02-05T19:39:25.394071Z",
+      "dateReceived": "2026-02-05T19:39:25.394071Z",
+      "entries": [
+        {
+          "type": "exception",
+          "data": {
+            "values": [
+              {
+                "type": "ConcurrencyError",
+                "value": "WARN buffer ownership conflict detected",
+                "mechanism": {
+                  "type": "generic",
+                  "handled": false
+                },
+                "stacktrace": {
+                  "frames": [
+                    {
+                      "filename": "tokio/runtime/scheduler.rs",
+                      "function": "block_on",
+                      "inApp": false,
+                      "lineNo": 99
+                    },
+                    {
+                      "filename": "axum/routing/mod.rs",
+                      "function": "call",
+                      "inApp": false,
+                      "lineNo": 381
+                    },
+                    {
+                      "filename": "tower/service.rs",
+                      "function": "poll_ready",
+                      "inApp": false,
+                      "lineNo": 475
+                    },
+                    {
+                      "filename": "crates/collab/src/db/buffers.rs",
+                      "absPath": "/app/crates/collab/src/db/buffers.rs",
+                      "function": "acquire_buffer_lock",
+                      "module": "crates::collab::src::db::buffers",
+                      "lineNo": 103,
+                      "colNo": 18,
+                      "context": [
+                        [
+                          -3,
+                          "    async fn process_request(&self, req: Request) -> Result<Response> {"
+                        ],
+                        [
+                          -2,
+                          "        let buffer_id = req.buffer_id();"
+                        ],
+                        [
+                          -1,
+                          "        // Check availability before acquiring"
+                        ],
+                        [
+                          0,
+                          "        let lock = self.acquire_buffer_lock(buffer_id).await?;  // <-- ERROR"
+                        ],
+                        [
+                          1,
+                          "        let result = self.process_buffer(&lock).await;"
+                        ],
+                        [
+                          2,
+                          "        Ok(result)"
+                        ]
+                      ],
+                      "inApp": true
+                    },
+                    {
+                      "filename": "crates/collab/src/db/mod.rs",
+                      "absPath": "/app/crates/collab/src/db/mod.rs",
+                      "function": "acquire_buffer_lock",
+                      "module": "crates::collab::src::db::mod",
+                      "lineNo": 184,
+                      "colNo": 40,
+                      "context": [
+                        [
+                          -3,
+                          "    async fn process_request(&self, req: Request) -> Result<Response> {"
+                        ],
+                        [
+                          -2,
+                          "        let buffer_id = req.buffer_id();"
+                        ],
+                        [
+                          -1,
+                          "        // Check availability before acquiring"
+                        ],
+                        [
+                          0,
+                          "        let lock = self.acquire_buffer_lock(buffer_id).await?;  // <-- ERROR"
+                        ],
+                        [
+                          1,
+                          "        let result = self.process_buffer(&lock).await;"
+                        ],
+                        [
+                          2,
+                          "        Ok(result)"
+                        ]
+                      ],
+                      "inApp": true
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "breadcrumbs",
+          "data": {
+            "values": [
+              {
+                "timestamp": "2026-02-05T19:59:25.394071Z",
+                "type": "default",
+                "category": "http",
+                "message": "HTTP request received",
+                "data": {
+                  "method": "POST",
+                  "url": "/api/buffers"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:00:25.394071Z",
+                "type": "default",
+                "category": "query",
+                "message": "Database query",
+                "data": {
+                  "query": "SELECT * FROM buffers WHERE id = $1"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:05:25.394071Z",
+                "type": "default",
+                "category": "info",
+                "message": "Buffer availability check",
+                "data": {
+                  "buffer_id": "12345",
+                  "available": true
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:07:25.394071Z",
+                "type": "default",
+                "category": "debug",
+                "message": "Attempting lock acquisition",
+                "data": {
+                  "buffer_id": "12345"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:11:25.394071Z",
+                "type": "default",
+                "category": "query",
+                "message": "Database query",
+                "data": {
+                  "query": "UPDATE buffers SET locked_by = $1"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:03:25.394071Z",
+                "type": "default",
+                "category": "error",
+                "message": "Lock acquisition failed",
+                "data": {
+                  "reason": "already_locked"
+                },
+                "level": "error"
+              }
+            ]
+          }
+        },
+        {
+          "type": "request",
+          "data": {
+            "method": "POST",
+            "url": "https://api.zed.dev/v1/buffers/acquire",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer [REDACTED]"
+              ],
+              [
+                "X-Request-ID",
+                "f8d7dcb6-43d7-eaeb-cca1-a6b85b5e2921"
+              ]
+            ],
+            "data": {
+              "buffer_id": "12345",
+              "project_id": "67890"
+            },
+            "inferredContentType": "application/json"
+          }
+        }
+      ],
+      "errors": [],
+      "fingerprints": [
+        "82097645-f484-15"
+      ],
+      "message": "WARN buffer ownership conflict detected",
+      "sdk": {
+        "name": "sentry.rust",
+        "version": "0.31.0"
+      },
+      "tags": [
+        [
+          "environment",
+          "production"
+        ],
+        [
+          "server_name",
+          "collab-5"
+        ],
+        [
+          "release",
+          "v0.120.3"
+        ],
+        [
+          "transaction",
+          "/api/buffers/acquire"
+        ],
+        [
+          "pattern_category",
+          "Distributed System Failures"
+        ]
+      ],
+      "user": {
+        "id": "058de523",
+        "email": "user285@example.com",
+        "ip_address": "192.168.57.1"
+      }
+    },
+    {
+      "eventID": "ea11cc45-fe6e-cd52-43ee-64c394dea007",
+      "context": {
+        "pattern_id": "RACE-001",
+        "buffer_state": {
+          "buffer_id": "12345",
+          "locked_by": null,
+          "lock_acquired_at": null
+        },
+        "request_context": {
+          "user_id": "a65c25dc",
+          "project_id": "67890",
+          "concurrent_users": 3
+        }
+      },
+      "contexts": {
+        "os": {
+          "name": "Linux",
+          "version": "5.15.0"
+        },
+        "runtime": {
+          "name": "rustc",
+          "version": "1.75.0"
+        },
+        "trace": {
+          "trace_id": "653e00f6-5e73-4ae6-a647-52b00be24994",
+          "span_id": "e4c8c718-6700-d4",
+          "op": "http.server",
+          "status": "internal_error"
+        }
+      },
+      "dateCreated": "2026-02-05T19:47:25.394071Z",
+      "dateReceived": "2026-02-05T19:46:25.394071Z",
+      "entries": [
+        {
+          "type": "exception",
+          "data": {
+            "values": [
+              {
+                "type": "ConcurrencyError",
+                "value": "WARN buffer ownership conflict detected",
+                "mechanism": {
+                  "type": "generic",
+                  "handled": false
+                },
+                "stacktrace": {
+                  "frames": [
+                    {
+                      "filename": "tokio/runtime/scheduler.rs",
+                      "function": "block_on",
+                      "inApp": false,
+                      "lineNo": 494
+                    },
+                    {
+                      "filename": "axum/routing/mod.rs",
+                      "function": "call",
+                      "inApp": false,
+                      "lineNo": 122
+                    },
+                    {
+                      "filename": "tower/service.rs",
+                      "function": "poll_ready",
+                      "inApp": false,
+                      "lineNo": 482
+                    },
+                    {
+                      "filename": "crates/collab/src/db/buffers.rs",
+                      "absPath": "/app/crates/collab/src/db/buffers.rs",
+                      "function": "acquire_buffer_lock",
+                      "module": "crates::collab::src::db::buffers",
+                      "lineNo": 147,
+                      "colNo": 34,
+                      "context": [
+                        [
+                          -3,
+                          "    async fn process_request(&self, req: Request) -> Result<Response> {"
+                        ],
+                        [
+                          -2,
+                          "        let buffer_id = req.buffer_id();"
+                        ],
+                        [
+                          -1,
+                          "        // Check availability before acquiring"
+                        ],
+                        [
+                          0,
+                          "        let lock = self.acquire_buffer_lock(buffer_id).await?;  // <-- ERROR"
+                        ],
+                        [
+                          1,
+                          "        let result = self.process_buffer(&lock).await;"
+                        ],
+                        [
+                          2,
+                          "        Ok(result)"
+                        ]
+                      ],
+                      "inApp": true
+                    },
+                    {
+                      "filename": "crates/collab/src/db/mod.rs",
+                      "absPath": "/app/crates/collab/src/db/mod.rs",
+                      "function": "acquire_buffer_lock",
+                      "module": "crates::collab::src::db::mod",
+                      "lineNo": 134,
+                      "colNo": 35,
+                      "context": [
+                        [
+                          -3,
+                          "    async fn process_request(&self, req: Request) -> Result<Response> {"
+                        ],
+                        [
+                          -2,
+                          "        let buffer_id = req.buffer_id();"
+                        ],
+                        [
+                          -1,
+                          "        // Check availability before acquiring"
+                        ],
+                        [
+                          0,
+                          "        let lock = self.acquire_buffer_lock(buffer_id).await?;  // <-- ERROR"
+                        ],
+                        [
+                          1,
+                          "        let result = self.process_buffer(&lock).await;"
+                        ],
+                        [
+                          2,
+                          "        Ok(result)"
+                        ]
+                      ],
+                      "inApp": true
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "breadcrumbs",
+          "data": {
+            "values": [
+              {
+                "timestamp": "2026-02-05T20:07:25.394071Z",
+                "type": "default",
+                "category": "http",
+                "message": "HTTP request received",
+                "data": {
+                  "method": "POST",
+                  "url": "/api/buffers"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:01:25.394071Z",
+                "type": "default",
+                "category": "query",
+                "message": "Database query",
+                "data": {
+                  "query": "SELECT * FROM buffers WHERE id = $1"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:02:25.394071Z",
+                "type": "default",
+                "category": "info",
+                "message": "Buffer availability check",
+                "data": {
+                  "buffer_id": "12345",
+                  "available": true
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:04:25.394071Z",
+                "type": "default",
+                "category": "debug",
+                "message": "Attempting lock acquisition",
+                "data": {
+                  "buffer_id": "12345"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:11:25.394071Z",
+                "type": "default",
+                "category": "query",
+                "message": "Database query",
+                "data": {
+                  "query": "UPDATE buffers SET locked_by = $1"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:07:25.394071Z",
+                "type": "default",
+                "category": "error",
+                "message": "Lock acquisition failed",
+                "data": {
+                  "reason": "already_locked"
+                },
+                "level": "error"
+              }
+            ]
+          }
+        },
+        {
+          "type": "request",
+          "data": {
+            "method": "POST",
+            "url": "https://api.zed.dev/v1/buffers/acquire",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer [REDACTED]"
+              ],
+              [
+                "X-Request-ID",
+                "e7e74b37-032e-83dc-68eb-b8bc6fa73d1a"
+              ]
+            ],
+            "data": {
+              "buffer_id": "12345",
+              "project_id": "67890"
+            },
+            "inferredContentType": "application/json"
+          }
+        }
+      ],
+      "errors": [],
+      "fingerprints": [
+        "e358d152-c106-70"
+      ],
+      "message": "WARN buffer ownership conflict detected",
+      "sdk": {
+        "name": "sentry.rust",
+        "version": "0.31.0"
+      },
+      "tags": [
+        [
+          "environment",
+          "production"
+        ],
+        [
+          "server_name",
+          "collab-5"
+        ],
+        [
+          "release",
+          "v0.129.0"
+        ],
+        [
+          "transaction",
+          "/api/buffers/acquire"
+        ],
+        [
+          "pattern_category",
+          "Distributed System Failures"
+        ]
+      ],
+      "user": {
+        "id": "b4c51371",
+        "email": "user987@example.com",
+        "ip_address": "192.168.122.108"
+      }
+    },
+    {
+      "eventID": "9f89a6ee-7172-ad73-da8d-a3873269b8c0",
+      "context": {
+        "pattern_id": "RACE-001",
+        "buffer_state": {
+          "buffer_id": "12345",
+          "locked_by": null,
+          "lock_acquired_at": null
+        },
+        "request_context": {
+          "user_id": "08c4f5ae",
+          "project_id": "67890",
+          "concurrent_users": 2
+        }
+      },
+      "contexts": {
+        "os": {
+          "name": "Linux",
+          "version": "5.15.0"
+        },
+        "runtime": {
+          "name": "rustc",
+          "version": "1.75.0"
+        },
+        "trace": {
+          "trace_id": "b37f59e6-575c-4a1b-65a1-14d3b9fbd8ce",
+          "span_id": "296bdfe2-a5e6-0a",
+          "op": "http.server",
+          "status": "internal_error"
+        }
+      },
+      "dateCreated": "2026-02-05T19:54:25.394071Z",
+      "dateReceived": "2026-02-05T19:53:25.394071Z",
+      "entries": [
+        {
+          "type": "exception",
+          "data": {
+            "values": [
+              {
+                "type": "ConcurrencyError",
+                "value": "WARN buffer ownership conflict detected",
+                "mechanism": {
+                  "type": "generic",
+                  "handled": false
+                },
+                "stacktrace": {
+                  "frames": [
+                    {
+                      "filename": "tokio/runtime/scheduler.rs",
+                      "function": "block_on",
+                      "inApp": false,
+                      "lineNo": 442
+                    },
+                    {
+                      "filename": "axum/routing/mod.rs",
+                      "function": "call",
+                      "inApp": false,
+                      "lineNo": 282
+                    },
+                    {
+                      "filename": "tower/service.rs",
+                      "function": "poll_ready",
+                      "inApp": false,
+                      "lineNo": 413
+                    },
+                    {
+                      "filename": "crates/collab/src/db/buffers.rs",
+                      "absPath": "/app/crates/collab/src/db/buffers.rs",
+                      "function": "acquire_buffer_lock",
+                      "module": "crates::collab::src::db::buffers",
+                      "lineNo": 106,
+                      "colNo": 39,
+                      "context": [
+                        [
+                          -3,
+                          "    async fn process_request(&self, req: Request) -> Result<Response> {"
+                        ],
+                        [
+                          -2,
+                          "        let buffer_id = req.buffer_id();"
+                        ],
+                        [
+                          -1,
+                          "        // Check availability before acquiring"
+                        ],
+                        [
+                          0,
+                          "        let lock = self.acquire_buffer_lock(buffer_id).await?;  // <-- ERROR"
+                        ],
+                        [
+                          1,
+                          "        let result = self.process_buffer(&lock).await;"
+                        ],
+                        [
+                          2,
+                          "        Ok(result)"
+                        ]
+                      ],
+                      "inApp": true
+                    },
+                    {
+                      "filename": "crates/collab/src/db/mod.rs",
+                      "absPath": "/app/crates/collab/src/db/mod.rs",
+                      "function": "acquire_buffer_lock",
+                      "module": "crates::collab::src::db::mod",
+                      "lineNo": 156,
+                      "colNo": 20,
+                      "context": [
+                        [
+                          -3,
+                          "    async fn process_request(&self, req: Request) -> Result<Response> {"
+                        ],
+                        [
+                          -2,
+                          "        let buffer_id = req.buffer_id();"
+                        ],
+                        [
+                          -1,
+                          "        // Check availability before acquiring"
+                        ],
+                        [
+                          0,
+                          "        let lock = self.acquire_buffer_lock(buffer_id).await?;  // <-- ERROR"
+                        ],
+                        [
+                          1,
+                          "        let result = self.process_buffer(&lock).await;"
+                        ],
+                        [
+                          2,
+                          "        Ok(result)"
+                        ]
+                      ],
+                      "inApp": true
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "breadcrumbs",
+          "data": {
+            "values": [
+              {
+                "timestamp": "2026-02-05T20:03:25.394071Z",
+                "type": "default",
+                "category": "http",
+                "message": "HTTP request received",
+                "data": {
+                  "method": "POST",
+                  "url": "/api/buffers"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:09:25.394071Z",
+                "type": "default",
+                "category": "query",
+                "message": "Database query",
+                "data": {
+                  "query": "SELECT * FROM buffers WHERE id = $1"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:07:25.394071Z",
+                "type": "default",
+                "category": "info",
+                "message": "Buffer availability check",
+                "data": {
+                  "buffer_id": "12345",
+                  "available": true
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:07:25.394071Z",
+                "type": "default",
+                "category": "debug",
+                "message": "Attempting lock acquisition",
+                "data": {
+                  "buffer_id": "12345"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:06:25.394071Z",
+                "type": "default",
+                "category": "query",
+                "message": "Database query",
+                "data": {
+                  "query": "UPDATE buffers SET locked_by = $1"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:11:25.394071Z",
+                "type": "default",
+                "category": "error",
+                "message": "Lock acquisition failed",
+                "data": {
+                  "reason": "already_locked"
+                },
+                "level": "error"
+              }
+            ]
+          }
+        },
+        {
+          "type": "request",
+          "data": {
+            "method": "POST",
+            "url": "https://api.zed.dev/v1/buffers/acquire",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer [REDACTED]"
+              ],
+              [
+                "X-Request-ID",
+                "257e6233-d014-01aa-82eb-b37f7ffa202d"
+              ]
+            ],
+            "data": {
+              "buffer_id": "12345",
+              "project_id": "67890"
+            },
+            "inferredContentType": "application/json"
+          }
+        }
+      ],
+      "errors": [],
+      "fingerprints": [
+        "6a96d317-3914-93"
+      ],
+      "message": "WARN buffer ownership conflict detected",
+      "sdk": {
+        "name": "sentry.rust",
+        "version": "0.31.0"
+      },
+      "tags": [
+        [
+          "environment",
+          "production"
+        ],
+        [
+          "server_name",
+          "collab-4"
+        ],
+        [
+          "release",
+          "v0.124.2"
+        ],
+        [
+          "transaction",
+          "/api/buffers/acquire"
+        ],
+        [
+          "pattern_category",
+          "Distributed System Failures"
+        ]
+      ],
+      "user": {
+        "id": "bfdf96be",
+        "email": "user698@example.com",
+        "ip_address": "192.168.150.184"
+      }
+    },
+    {
+      "eventID": "0aa90ffb-a183-7829-549c-c0f18e3689e9",
+      "context": {
+        "pattern_id": "RACE-001",
+        "buffer_state": {
+          "buffer_id": "12345",
+          "locked_by": null,
+          "lock_acquired_at": null
+        },
+        "request_context": {
+          "user_id": "07ececce",
+          "project_id": "67890",
+          "concurrent_users": 4
+        }
+      },
+      "contexts": {
+        "os": {
+          "name": "Linux",
+          "version": "5.15.0"
+        },
+        "runtime": {
+          "name": "rustc",
+          "version": "1.75.0"
+        },
+        "trace": {
+          "trace_id": "0ec3e11c-c210-2cad-fff4-4ab2fc843f12",
+          "span_id": "f99c79ef-eb26-49",
+          "op": "http.server",
+          "status": "internal_error"
+        }
+      },
+      "dateCreated": "2026-02-05T20:06:25.394071Z",
+      "dateReceived": "2026-02-05T20:13:25.394071Z",
+      "entries": [
+        {
+          "type": "exception",
+          "data": {
+            "values": [
+              {
+                "type": "ConcurrencyError",
+                "value": "WARN buffer ownership conflict detected",
+                "mechanism": {
+                  "type": "generic",
+                  "handled": false
+                },
+                "stacktrace": {
+                  "frames": [
+                    {
+                      "filename": "tokio/runtime/scheduler.rs",
+                      "function": "block_on",
+                      "inApp": false,
+                      "lineNo": 384
+                    },
+                    {
+                      "filename": "axum/routing/mod.rs",
+                      "function": "call",
+                      "inApp": false,
+                      "lineNo": 339
+                    },
+                    {
+                      "filename": "tower/service.rs",
+                      "function": "poll_ready",
+                      "inApp": false,
+                      "lineNo": 232
+                    },
+                    {
+                      "filename": "crates/collab/src/db/buffers.rs",
+                      "absPath": "/app/crates/collab/src/db/buffers.rs",
+                      "function": "acquire_buffer_lock",
+                      "module": "crates::collab::src::db::buffers",
+                      "lineNo": 30,
+                      "colNo": 30,
+                      "context": [
+                        [
+                          -3,
+                          "    async fn process_request(&self, req: Request) -> Result<Response> {"
+                        ],
+                        [
+                          -2,
+                          "        let buffer_id = req.buffer_id();"
+                        ],
+                        [
+                          -1,
+                          "        // Check availability before acquiring"
+                        ],
+                        [
+                          0,
+                          "        let lock = self.acquire_buffer_lock(buffer_id).await?;  // <-- ERROR"
+                        ],
+                        [
+                          1,
+                          "        let result = self.process_buffer(&lock).await;"
+                        ],
+                        [
+                          2,
+                          "        Ok(result)"
+                        ]
+                      ],
+                      "inApp": true
+                    },
+                    {
+                      "filename": "crates/collab/src/db/mod.rs",
+                      "absPath": "/app/crates/collab/src/db/mod.rs",
+                      "function": "acquire_buffer_lock",
+                      "module": "crates::collab::src::db::mod",
+                      "lineNo": 80,
+                      "colNo": 14,
+                      "context": [
+                        [
+                          -3,
+                          "    async fn process_request(&self, req: Request) -> Result<Response> {"
+                        ],
+                        [
+                          -2,
+                          "        let buffer_id = req.buffer_id();"
+                        ],
+                        [
+                          -1,
+                          "        // Check availability before acquiring"
+                        ],
+                        [
+                          0,
+                          "        let lock = self.acquire_buffer_lock(buffer_id).await?;  // <-- ERROR"
+                        ],
+                        [
+                          1,
+                          "        let result = self.process_buffer(&lock).await;"
+                        ],
+                        [
+                          2,
+                          "        Ok(result)"
+                        ]
+                      ],
+                      "inApp": true
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "breadcrumbs",
+          "data": {
+            "values": [
+              {
+                "timestamp": "2026-02-05T20:06:25.394071Z",
+                "type": "default",
+                "category": "http",
+                "message": "HTTP request received",
+                "data": {
+                  "method": "POST",
+                  "url": "/api/buffers"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:07:25.394071Z",
+                "type": "default",
+                "category": "query",
+                "message": "Database query",
+                "data": {
+                  "query": "SELECT * FROM buffers WHERE id = $1"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:00:25.394071Z",
+                "type": "default",
+                "category": "info",
+                "message": "Buffer availability check",
+                "data": {
+                  "buffer_id": "12345",
+                  "available": true
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:04:25.394071Z",
+                "type": "default",
+                "category": "debug",
+                "message": "Attempting lock acquisition",
+                "data": {
+                  "buffer_id": "12345"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:03:25.394071Z",
+                "type": "default",
+                "category": "query",
+                "message": "Database query",
+                "data": {
+                  "query": "UPDATE buffers SET locked_by = $1"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:11:25.394071Z",
+                "type": "default",
+                "category": "error",
+                "message": "Lock acquisition failed",
+                "data": {
+                  "reason": "already_locked"
+                },
+                "level": "error"
+              }
+            ]
+          }
+        },
+        {
+          "type": "request",
+          "data": {
+            "method": "POST",
+            "url": "https://api.zed.dev/v1/buffers/acquire",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer [REDACTED]"
+              ],
+              [
+                "X-Request-ID",
+                "351af288-2ba0-8476-fbe3-bf362ab67abf"
+              ]
+            ],
+            "data": {
+              "buffer_id": "12345",
+              "project_id": "67890"
+            },
+            "inferredContentType": "application/json"
+          }
+        }
+      ],
+      "errors": [],
+      "fingerprints": [
+        "e8e5b2e8-3afe-d1"
+      ],
+      "message": "WARN buffer ownership conflict detected",
+      "sdk": {
+        "name": "sentry.rust",
+        "version": "0.31.0"
+      },
+      "tags": [
+        [
+          "environment",
+          "production"
+        ],
+        [
+          "server_name",
+          "collab-5"
+        ],
+        [
+          "release",
+          "v0.124.1"
+        ],
+        [
+          "transaction",
+          "/api/buffers/acquire"
+        ],
+        [
+          "pattern_category",
+          "Distributed System Failures"
+        ]
+      ],
+      "user": {
+        "id": "ad64c85c",
+        "email": "user851@example.com",
+        "ip_address": "192.168.136.94"
+      }
+    },
+    {
+      "eventID": "e90c1126-81e2-18bd-d7a1-e9914a5006a3",
+      "context": {
+        "pattern_id": "RACE-001",
+        "buffer_state": {
+          "buffer_id": "12345",
+          "locked_by": null,
+          "lock_acquired_at": null
+        },
+        "request_context": {
+          "user_id": "e958c911",
+          "project_id": "67890",
+          "concurrent_users": 3
+        }
+      },
+      "contexts": {
+        "os": {
+          "name": "Linux",
+          "version": "5.15.0"
+        },
+        "runtime": {
+          "name": "rustc",
+          "version": "1.75.0"
+        },
+        "trace": {
+          "trace_id": "290436c7-007a-f9c9-bca6-b3f2494046af",
+          "span_id": "29f065d9-6515-5f",
+          "op": "http.server",
+          "status": "internal_error"
+        }
+      },
+      "dateCreated": "2026-02-05T20:18:25.394071Z",
+      "dateReceived": "2026-02-05T20:15:25.394071Z",
+      "entries": [
+        {
+          "type": "exception",
+          "data": {
+            "values": [
+              {
+                "type": "ConcurrencyError",
+                "value": "WARN buffer ownership conflict detected",
+                "mechanism": {
+                  "type": "generic",
+                  "handled": false
+                },
+                "stacktrace": {
+                  "frames": [
+                    {
+                      "filename": "tokio/runtime/scheduler.rs",
+                      "function": "block_on",
+                      "inApp": false,
+                      "lineNo": 253
+                    },
+                    {
+                      "filename": "axum/routing/mod.rs",
+                      "function": "call",
+                      "inApp": false,
+                      "lineNo": 360
+                    },
+                    {
+                      "filename": "tower/service.rs",
+                      "function": "poll_ready",
+                      "inApp": false,
+                      "lineNo": 343
+                    },
+                    {
+                      "filename": "crates/collab/src/db/buffers.rs",
+                      "absPath": "/app/crates/collab/src/db/buffers.rs",
+                      "function": "acquire_buffer_lock",
+                      "module": "crates::collab::src::db::buffers",
+                      "lineNo": 146,
+                      "colNo": 6,
+                      "context": [
+                        [
+                          -3,
+                          "    async fn process_request(&self, req: Request) -> Result<Response> {"
+                        ],
+                        [
+                          -2,
+                          "        let buffer_id = req.buffer_id();"
+                        ],
+                        [
+                          -1,
+                          "        // Check availability before acquiring"
+                        ],
+                        [
+                          0,
+                          "        let lock = self.acquire_buffer_lock(buffer_id).await?;  // <-- ERROR"
+                        ],
+                        [
+                          1,
+                          "        let result = self.process_buffer(&lock).await;"
+                        ],
+                        [
+                          2,
+                          "        Ok(result)"
+                        ]
+                      ],
+                      "inApp": true
+                    },
+                    {
+                      "filename": "crates/collab/src/db/mod.rs",
+                      "absPath": "/app/crates/collab/src/db/mod.rs",
+                      "function": "acquire_buffer_lock",
+                      "module": "crates::collab::src::db::mod",
+                      "lineNo": 105,
+                      "colNo": 22,
+                      "context": [
+                        [
+                          -3,
+                          "    async fn process_request(&self, req: Request) -> Result<Response> {"
+                        ],
+                        [
+                          -2,
+                          "        let buffer_id = req.buffer_id();"
+                        ],
+                        [
+                          -1,
+                          "        // Check availability before acquiring"
+                        ],
+                        [
+                          0,
+                          "        let lock = self.acquire_buffer_lock(buffer_id).await?;  // <-- ERROR"
+                        ],
+                        [
+                          1,
+                          "        let result = self.process_buffer(&lock).await;"
+                        ],
+                        [
+                          2,
+                          "        Ok(result)"
+                        ]
+                      ],
+                      "inApp": true
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "breadcrumbs",
+          "data": {
+            "values": [
+              {
+                "timestamp": "2026-02-05T20:05:25.394071Z",
+                "type": "default",
+                "category": "http",
+                "message": "HTTP request received",
+                "data": {
+                  "method": "POST",
+                  "url": "/api/buffers"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:01:25.394071Z",
+                "type": "default",
+                "category": "query",
+                "message": "Database query",
+                "data": {
+                  "query": "SELECT * FROM buffers WHERE id = $1"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:06:25.394071Z",
+                "type": "default",
+                "category": "info",
+                "message": "Buffer availability check",
+                "data": {
+                  "buffer_id": "12345",
+                  "available": true
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:03:25.394071Z",
+                "type": "default",
+                "category": "debug",
+                "message": "Attempting lock acquisition",
+                "data": {
+                  "buffer_id": "12345"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:12:25.394071Z",
+                "type": "default",
+                "category": "query",
+                "message": "Database query",
+                "data": {
+                  "query": "UPDATE buffers SET locked_by = $1"
+                },
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-02-05T20:13:25.394071Z",
+                "type": "default",
+                "category": "error",
+                "message": "Lock acquisition failed",
+                "data": {
+                  "reason": "already_locked"
+                },
+                "level": "error"
+              }
+            ]
+          }
+        },
+        {
+          "type": "request",
+          "data": {
+            "method": "POST",
+            "url": "https://api.zed.dev/v1/buffers/acquire",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer [REDACTED]"
+              ],
+              [
+                "X-Request-ID",
+                "7cc22561-10e1-d0f3-a90c-295907a642d3"
+              ]
+            ],
+            "data": {
+              "buffer_id": "12345",
+              "project_id": "67890"
+            },
+            "inferredContentType": "application/json"
+          }
+        }
+      ],
+      "errors": [],
+      "fingerprints": [
+        "76b763ed-042b-8a"
+      ],
+      "message": "WARN buffer ownership conflict detected",
+      "sdk": {
+        "name": "sentry.rust",
+        "version": "0.31.0"
+      },
+      "tags": [
+        [
+          "environment",
+          "production"
+        ],
+        [
+          "server_name",
+          "collab-5"
+        ],
+        [
+          "release",
+          "v0.128.2"
+        ],
+        [
+          "transaction",
+          "/api/buffers/acquire"
+        ],
+        [
+          "pattern_category",
+          "Distributed System Failures"
+        ]
+      ],
+      "user": {
+        "id": "65269668",
+        "email": "user337@example.com",
+        "ip_address": "192.168.103.77"
+      }
+    }
+  ],
+  "breadcrumbs": [
+    {
+      "timestamp": "2026-02-05T19:58:25.394071Z",
+      "type": "default",
+      "category": "http",
+      "message": "HTTP request received",
+      "data": {
+        "method": "POST",
+        "url": "/api/buffers"
+      },
+      "level": "info"
+    },
+    {
+      "timestamp": "2026-02-05T20:01:25.394071Z",
+      "type": "default",
+      "category": "query",
+      "message": "Database query",
+      "data": {
+        "query": "SELECT * FROM buffers WHERE id = $1"
+      },
+      "level": "info"
+    },
+    {
+      "timestamp": "2026-02-05T20:09:25.394071Z",
+      "type": "default",
+      "category": "info",
+      "message": "Buffer availability check",
+      "data": {
+        "buffer_id": "12345",
+        "available": true
+      },
+      "level": "info"
+    },
+    {
+      "timestamp": "2026-02-05T20:06:25.394071Z",
+      "type": "default",
+      "category": "debug",
+      "message": "Attempting lock acquisition",
+      "data": {
+        "buffer_id": "12345"
+      },
+      "level": "info"
+    },
+    {
+      "timestamp": "2026-02-05T20:06:25.394071Z",
+      "type": "default",
+      "category": "query",
+      "message": "Database query",
+      "data": {
+        "query": "UPDATE buffers SET locked_by = $1"
+      },
+      "level": "info"
+    },
+    {
+      "timestamp": "2026-02-05T20:07:25.394071Z",
+      "type": "default",
+      "category": "error",
+      "message": "Lock acquisition failed",
+      "data": {
+        "reason": "already_locked"
+      },
+      "level": "error"
+    }
+  ]
+}

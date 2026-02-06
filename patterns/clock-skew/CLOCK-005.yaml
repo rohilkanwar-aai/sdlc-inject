@@ -1,0 +1,177 @@
+id: CLOCK-005
+version: "1.0"
+name: "Session expiry calculation with clock drift"
+category: "Distributed System Failures"
+subcategory: "Clock Skew & Time Issues"
+
+sdlc_phases:
+  primary: "Debugging"
+  secondary: ["Maintenance"]
+
+description: |
+  Session tokens are validated by comparing the token's creation timestamp
+  against the current time plus a max age. When the authentication server's
+  clock drifts relative to the API server's clock, sessions may be prematurely
+  rejected (server ahead) or improperly extended (server behind).
+
+target_codebase:
+  name: "zed"
+  min_version: "0.120.0"
+  language: "rust"
+
+injection:
+  files:
+    - path: "crates/collab/src/auth.rs"
+      patches:
+        - type: "replace"
+          old: "fn validate_session(&self, token: &SessionToken) -> Result<Session, AuthError> {"
+          new: |
+            fn validate_session(&self, token: &SessionToken) -> Result<Session, AuthError> {
+                let now = SystemTime::now();
+                let token_age = now.duration_since(token.created_at)
+                    .map_err(|_| AuthError::ClockSkew)?;  // Clock went backward!
+
+                // Bug: Doesn't account for clock drift between services
+                // Auth server may have created token with different clock
+                if token_age > self.max_session_age {
+                    return Err(AuthError::SessionExpired);
+                }
+
+                // Missing: leeway for clock skew
+                // Missing: use token's own expiry claim instead of computed age
+
+    - path: "crates/collab/src/token.rs"
+      patches:
+        - type: "replace"
+          old: "fn create_session_token(&self, user_id: UserId) -> SessionToken {"
+          new: |
+            fn create_session_token(&self, user_id: UserId) -> SessionToken {
+                // Bug: Uses local clock for timestamp
+                // Different server validating may have different clock
+                SessionToken {
+                    user_id,
+                    created_at: SystemTime::now(),
+                    // Missing: expires_at calculated with buffer
+                    // Missing: signed expiry claim
+                }
+
+trigger:
+  conditions:
+    - "Clock skew > 30 seconds between auth and API servers"
+    - "Session validation occurs on different server than creation"
+
+  reproduction_steps:
+    - step: 1
+      action: "Set auth server clock 1 minute ahead"
+    - step: 2
+      action: "Create session on auth server"
+    - step: 3
+      action: "Validate session on API server (clock behind)"
+    - step: 4
+      action: "Session appears to be created 'in the future' -> rejected"
+
+observable_symptoms:
+  user_visible:
+    - symptom: "Intermittent login failures"
+    - symptom: "'Session expired' error on fresh login"
+    - symptom: "Login works on some servers, fails on others"
+
+  log_messages:
+    - pattern: "WARN.*session created in future"
+      level: "warn"
+    - pattern: "ERROR.*clock skew detected.*duration_since"
+      level: "error"
+
+  metrics:
+    - name: "session_validation_failures"
+      type: "counter"
+      labels: ["reason"]
+      anomaly: "'clock_skew' reason increases"
+
+difficulty:
+  estimated_human_time_hours: 2
+  frontier_model_pass_rate_percent: 40
+
+failure_modes:
+  common:
+    - mode: "Increase session max age"
+      description: "Masks the problem, reduces security"
+    - mode: "Sync clocks only"
+      description: "Doesn't handle transient drift"
+
+golden_path:
+  steps:
+    - step: 1
+      action: "Reproduce with intentional clock offset"
+    - step: 2
+      action: "Add logging for token timestamps vs local time"
+    - step: 3
+      action: "Identify missing clock skew tolerance"
+    - step: 4
+      action: "Implement proper expiry handling"
+      solutions:
+        preferred: |
+          const CLOCK_SKEW_LEEWAY: Duration = Duration::from_secs(60);
+
+          fn validate_session(&self, token: &SessionToken) -> Result<Session, AuthError> {
+              let now = SystemTime::now();
+
+              // Use explicit expiry time set in token, not computed age
+              let expires_at = token.expires_at;
+
+              // Allow leeway for clock skew
+              let expires_with_leeway = expires_at + CLOCK_SKEW_LEEWAY;
+
+              if now > expires_with_leeway {
+                  return Err(AuthError::SessionExpired);
+              }
+
+              // Also check not-before with leeway (token from "future")
+              let created_with_leeway = token.created_at - CLOCK_SKEW_LEEWAY;
+              if now < created_with_leeway {
+                  return Err(AuthError::TokenNotYetValid);
+              }
+
+              Ok(token.into_session())
+          }
+
+        alternative: |
+          // Use relative monotonic TTL instead of absolute timestamps
+          struct SessionToken {
+              user_id: UserId,
+              ttl_seconds: u64,
+              issued_at_server_id: ServerId,
+              signature: Signature,
+          }
+
+          // Server tracks its own issuance and validates locally
+
+grading:
+  outcome_based:
+    - criterion: "Sessions valid across servers with clock skew"
+      weight: 0.40
+      verification:
+        type: "integration_test"
+        description: "Test with simulated 30s clock difference"
+
+    - criterion: "Security not degraded"
+      weight: 0.25
+
+  process_based:
+    - criterion: "Identified cross-server clock issue"
+      weight: 0.20
+    - criterion: "Added appropriate leeway"
+      weight: 0.15
+
+hints:
+  progressive:
+    - level: 1
+      content: "What if the server creating tokens has a different clock than the validating server?"
+    - level: 2
+      content: "The token's created_at might be 'in the future' from another server's perspective."
+
+tags:
+  - "clock-skew"
+  - "authentication"
+  - "session"
+  - "distributed"

@@ -1,0 +1,186 @@
+id: RACE-002
+version: "1.0"
+name: "Concurrent document ID generation collision"
+category: "Distributed System Failures"
+subcategory: "Race Conditions"
+
+sdlc_phases:
+  primary: "Debugging"
+  secondary: ["Verification"]
+
+description: |
+  A race condition in document ID generation causes duplicate IDs when multiple
+  users create documents simultaneously. The ID generator uses a non-atomic
+  read-increment-write pattern that can produce collisions under concurrent load.
+
+target_codebase:
+  name: "zed"
+  min_version: "0.120.0"
+  language: "rust"
+
+injection:
+  files:
+    - path: "crates/collab/src/rpc/protocol.rs"
+      patches:
+        - type: "replace"
+          old: "let doc_id = self.id_generator.next_id().await?;"
+          new: |
+            // Read current max ID
+            let current_max = self.get_max_document_id().await?;
+            // Increment (race window here)
+            let doc_id = DocumentId(current_max.0 + 1);
+            // Write new ID
+            self.set_max_document_id(doc_id).await?;
+
+    - path: "crates/collab/src/db/documents.rs"
+      patches:
+        - type: "insert"
+          location: "impl_block"
+          content: |
+            async fn get_max_document_id(&self) -> Result<DocumentId> {
+                let max: Option<i64> = sqlx::query_scalar!(
+                    "SELECT MAX(id) FROM documents"
+                )
+                .fetch_one(&self.pool)
+                .await?;
+                Ok(DocumentId(max.unwrap_or(0)))
+            }
+
+            async fn set_max_document_id(&self, id: DocumentId) -> Result<()> {
+                // No-op, ID will be set on insert
+                // This creates the illusion of a sequence but isn't atomic
+                Ok(())
+            }
+
+  obfuscation:
+    strategy: "performance_optimization"
+    techniques:
+      - type: "add_misleading_comment"
+        content: "// Optimized ID generation to reduce database round-trips"
+      - type: "rename_function"
+        from: "generate_id_unsafe"
+        to: "generate_id_optimized"
+
+trigger:
+  conditions:
+    - "Multiple users creating documents in same project"
+    - "Requests arrive within same database transaction window (~10ms)"
+    - "High load (>10 concurrent document creations)"
+
+  reproduction_steps:
+    - step: 1
+      action: "Start server under load"
+    - step: 2
+      action: "Spawn 20 concurrent document creation requests"
+    - step: 3
+      action: "Observe duplicate key errors or silent overwrites"
+
+observable_symptoms:
+  user_visible:
+    - symptom: "Document creation fails with 'duplicate key' error"
+    - symptom: "Document content unexpectedly replaced"
+    - symptom: "Recently created document not found"
+
+  log_messages:
+    - pattern: "ERROR.*duplicate key.*documents_pkey"
+      level: "error"
+    - pattern: "WARN.*document_id collision detected"
+      level: "warning"
+
+  metrics:
+    - name: "document_creation_errors_total"
+      type: "counter"
+      labels: ["error_type"]
+    - name: "document_id_collisions_total"
+      type: "counter"
+
+difficulty:
+  estimated_human_time_hours: 2
+  frontier_model_pass_rate_percent: 35
+
+failure_modes:
+  common:
+    - mode: "Add retry logic"
+      description: "Retries on duplicate key without fixing generation"
+    - mode: "Use random IDs"
+      description: "Switches to UUIDs but doesn't understand original bug"
+
+golden_path:
+  steps:
+    - step: 1
+      action: "Reproduce with concurrent requests"
+      tools: ["load testing", "parallel curl"]
+
+    - step: 2
+      action: "Check database for duplicate IDs"
+      commands:
+        - "SELECT id, COUNT(*) FROM documents GROUP BY id HAVING COUNT(*) > 1"
+
+    - step: 3
+      action: "Trace ID generation code"
+      search_queries:
+        - "generate_id"
+        - "next_id"
+        - "DocumentId"
+
+    - step: 4
+      action: "Identify read-increment-write pattern"
+      key_insight: "get_max_document_id and insert are not atomic"
+
+    - step: 5
+      action: "Implement atomic ID generation"
+      solutions:
+        preferred: |
+          // Use database sequence
+          let doc_id: i64 = sqlx::query_scalar!(
+              "INSERT INTO documents DEFAULT VALUES RETURNING id"
+          ).fetch_one(&self.pool).await?;
+        alternative: |
+          // Use atomic counter with compare-and-swap
+          loop {
+              let current = self.id_counter.load(Ordering::SeqCst);
+              if self.id_counter.compare_exchange(
+                  current, current + 1, Ordering::SeqCst, Ordering::SeqCst
+              ).is_ok() {
+                  return Ok(DocumentId(current + 1));
+              }
+          }
+
+grading:
+  outcome_based:
+    - criterion: "ID collisions eliminated"
+      weight: 0.40
+      verification:
+        type: "concurrent_test"
+        iterations: 1000
+
+    - criterion: "IDs are unique across restarts"
+      weight: 0.20
+
+  process_based:
+    - criterion: "Identified non-atomic pattern"
+      weight: 0.20
+    - criterion: "Added uniqueness test"
+      weight: 0.20
+
+hints:
+  progressive:
+    - level: 1
+      content: "The bug is in how document IDs are generated."
+    - level: 2
+      content: "Look at the get_max_document_id function and what happens between reading the max and inserting."
+    - level: 3
+      content: "This is a classic read-modify-write race. Consider using database sequences or atomic operations."
+
+related_patterns:
+  - id: "RACE-001"
+    relationship: "similar"
+  - id: "COORD-008"
+    relationship: "similar"
+    description: "Replica ID collision is same pattern"
+
+tags:
+  - "race-condition"
+  - "id-generation"
+  - "database"
+  - "read-modify-write"

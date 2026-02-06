@@ -1,0 +1,327 @@
+id: CLOCK-001
+version: "1.0"
+name: "Edit timestamp ordering wrong due to clock drift"
+category: "Distributed System Failures"
+subcategory: "Clock Skew & Time Issues"
+
+sdlc_phases:
+  primary: "Debugging"
+  secondary: ["Maintenance"]
+
+description: |
+  The CRDT implementation uses wall-clock timestamps for conflict resolution
+  via Last-Write-Wins (LWW). When clocks drift between nodes, edits may be
+  applied in the wrong order, causing the "wrong" edit to win and silently
+  dropping user changes.
+
+target_codebase:
+  name: "zed"
+  min_version: "0.120.0"
+  language: "rust"
+
+injection:
+  files:
+    - path: "crates/text/src/crdt.rs"
+      patches:
+        - type: "replace"
+          old: "fn resolve_conflict(&self, a: &Edit, b: &Edit) -> &Edit {"
+          new: |
+            fn resolve_conflict(&self, a: &Edit, b: &Edit) -> &Edit {
+                // LWW based on wall-clock timestamp
+                // Bug: Assumes clocks are synchronized
+                if a.timestamp > b.timestamp {
+                    a
+                } else {
+                    b
+                }
+            }
+
+    - path: "crates/collab/src/sync.rs"
+      patches:
+        - type: "replace"
+          old: "let timestamp = self.clock.now();"
+          new: |
+            // Use local system time (vulnerable to drift)
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+
+  config_changes:
+    - file: "crates/collab/src/config.rs"
+      changes:
+        - key: "USE_LOGICAL_CLOCKS"
+          old_value: "true"
+          new_value: "false"
+          comment: "Disabled for simplicity - physical timestamps are sufficient"
+
+  obfuscation:
+    strategy: "simplification"
+    techniques:
+      - type: "remove_code"
+        description: "Remove Lamport clock implementation as 'unused'"
+      - type: "add_misleading_comment"
+        content: "// Physical timestamps provide natural ordering - logical clocks add unnecessary complexity"
+
+trigger:
+  conditions:
+    - "Two or more users editing same document"
+    - "Clock drift > 100ms between client machines"
+    - "Concurrent edits to same text region"
+
+  reproduction_steps:
+    - step: 1
+      action: "Set up two clients with different system times"
+      command: |
+        # On client A (set clock 5 seconds ahead)
+        sudo date -s "+5 seconds"
+        # On client B (normal time)
+    - step: 2
+      action: "Both clients edit same line simultaneously"
+    - step: 3
+      action: "Client A's edit (made 'later' by wall clock) always wins"
+    - step: 4
+      action: "Client B's changes are silently dropped"
+
+observable_symptoms:
+  user_visible:
+    - symptom: "Edits disappear without explanation"
+    - symptom: "One user's changes always 'win' over another's"
+    - symptom: "Merge results seem arbitrary"
+
+  log_messages:
+    - pattern: "DEBUG.*conflict resolved.*timestamp.*>"
+      level: "debug"
+    - pattern: "TRACE.*LWW winner.*timestamp"
+      level: "trace"
+
+  metrics:
+    - name: "conflict_resolutions_total"
+      labels: ["resolution_type"]
+    - name: "clock_drift_detected_ms"
+      type: "gauge"
+
+  diagnostic_queries:
+    - description: "Check for clock drift indicators"
+      query: |
+        SELECT
+          client_id,
+          MAX(timestamp) - MIN(timestamp) as timestamp_spread,
+          COUNT(*) as edit_count
+        FROM edits
+        WHERE created_at > NOW() - INTERVAL '1 hour'
+        GROUP BY client_id
+        HAVING MAX(timestamp) - MIN(timestamp) > 5000
+
+difficulty:
+  estimated_human_time_hours: 4
+  frontier_model_pass_rate_percent: 20
+  complexity_factors:
+    - "Requires understanding of distributed time"
+    - "Symptoms are subtle (silent data loss)"
+    - "Bug is hidden in 'simplification'"
+    - "Hard to reproduce without clock manipulation"
+
+failure_modes:
+  common:
+    - mode: "Increase NTP sync frequency"
+      description: "Tries to fix clock drift rather than algorithm"
+    - mode: "Add conflict markers"
+      description: "Shows conflicts to user but doesn't fix root cause"
+
+  subtle:
+    - mode: "Add Lamport clocks incorrectly"
+      description: "Implements logical clocks but doesn't integrate with LWW"
+    - mode: "Use hybrid clock wrong"
+      description: "Adds HLC but max() operation is still wrong"
+
+golden_path:
+  steps:
+    - step: 1
+      action: "Reproduce with artificial clock drift"
+      commands:
+        - "sudo date -s '+5 seconds'"  # On one machine
+        - "# Edit same line from both clients"
+
+    - step: 2
+      action: "Observe one client's edits always winning"
+      verification: "Client with 'faster' clock wins conflicts"
+
+    - step: 3
+      action: "Search for timestamp-based conflict resolution"
+      search_queries:
+        - "resolve_conflict"
+        - "timestamp"
+        - "LWW"
+        - "last.*write.*wins"
+
+    - step: 4
+      action: "Identify wall-clock dependency"
+      key_insight: "SystemTime::now() used for ordering"
+
+    - step: 5
+      action: "Understand why physical clocks are insufficient"
+      key_insight: |
+        Physical clocks can drift, causing incorrect ordering.
+        Logical clocks (Lamport, Vector) or Hybrid Logical Clocks
+        provide causal ordering without clock synchronization.
+
+    - step: 6
+      action: "Implement Hybrid Logical Clock"
+      solutions:
+        hlc_implementation: |
+          struct HybridLogicalClock {
+              physical: AtomicU64,
+              logical: AtomicU64,
+          }
+
+          impl HybridLogicalClock {
+              fn now(&self) -> HLCTimestamp {
+                  let pt = get_physical_time();
+                  let mut l = self.physical.load(Ordering::SeqCst);
+                  let mut c = self.logical.load(Ordering::SeqCst);
+
+                  if pt > l {
+                      l = pt;
+                      c = 0;
+                  } else {
+                      c += 1;
+                  }
+
+                  self.physical.store(l, Ordering::SeqCst);
+                  self.logical.store(c, Ordering::SeqCst);
+
+                  HLCTimestamp { physical: l, logical: c }
+              }
+
+              fn update(&self, received: HLCTimestamp) -> HLCTimestamp {
+                  let pt = get_physical_time();
+                  let mut l = self.physical.load(Ordering::SeqCst);
+                  let mut c = self.logical.load(Ordering::SeqCst);
+
+                  if pt > l && pt > received.physical {
+                      l = pt;
+                      c = 0;
+                  } else if l > received.physical {
+                      c += 1;
+                  } else if received.physical > l {
+                      l = received.physical;
+                      c = received.logical + 1;
+                  } else {
+                      c = max(c, received.logical) + 1;
+                  }
+
+                  self.physical.store(l, Ordering::SeqCst);
+                  self.logical.store(c, Ordering::SeqCst);
+
+                  HLCTimestamp { physical: l, logical: c }
+              }
+          }
+
+        conflict_resolution_fix: |
+          fn resolve_conflict(&self, a: &Edit, b: &Edit) -> &Edit {
+              // Use HLC timestamp for proper causal ordering
+              match a.hlc_timestamp.cmp(&b.hlc_timestamp) {
+                  Ordering::Greater => a,
+                  Ordering::Less => b,
+                  Ordering::Equal => {
+                      // Tie-break deterministically by replica ID
+                      if a.replica_id > b.replica_id { a } else { b }
+                  }
+              }
+          }
+
+    - step: 7
+      action: "Add clock drift test"
+      test_code: |
+        #[test]
+        fn test_conflict_resolution_with_clock_drift() {
+            let clock_a = HybridLogicalClock::new();
+            let clock_b = HybridLogicalClock::new();
+
+            // Simulate B's clock being 5 seconds ahead
+            clock_b.advance_physical(5000);
+
+            let edit_a = Edit {
+                content: "A's edit",
+                hlc_timestamp: clock_a.now(),
+                replica_id: ReplicaId(1),
+            };
+
+            // B's edit happens after A's (causally)
+            clock_b.update(edit_a.hlc_timestamp);
+            let edit_b = Edit {
+                content: "B's edit (should win)",
+                hlc_timestamp: clock_b.now(),
+                replica_id: ReplicaId(2),
+            };
+
+            // B's edit should win regardless of physical clock drift
+            let winner = resolve_conflict(&edit_a, &edit_b);
+            assert_eq!(winner.content, "B's edit (should win)");
+        }
+
+grading:
+  outcome_based:
+    - criterion: "Conflict resolution is clock-drift-independent"
+      weight: 0.35
+      verification:
+        type: "clock_drift_test"
+        drift_amounts_ms: [100, 1000, 5000, -5000]
+
+    - criterion: "Causal ordering preserved"
+      weight: 0.25
+      verification:
+        type: "causality_test"
+
+    - criterion: "No data loss during conflicts"
+      weight: 0.15
+
+  process_based:
+    - criterion: "Identified LWW with physical clock issue"
+      weight: 0.10
+    - criterion: "Implemented logical or hybrid clock"
+      weight: 0.15
+
+hints:
+  progressive:
+    - level: 1
+      content: "The bug is related to how time is used in the system."
+    - level: 2
+      content: "Look at how conflicts between edits are resolved."
+    - level: 3
+      content: "What happens if two machines have different system clocks?"
+    - level: 4
+      content: "Physical (wall-clock) time is unreliable in distributed systems. Consider Lamport clocks or Hybrid Logical Clocks."
+
+environment:
+  clock_manipulation:
+    tool: "libfaketime"
+    setup: |
+      # Run client with skewed clock
+      LD_PRELOAD=/usr/lib/faketime/libfaketime.so.1 \
+      FAKETIME="+5s" \
+      ./zed
+
+related_patterns:
+  - id: "COORD-002"
+    relationship: "uses"
+    description: "CRDT merge relies on timestamps"
+  - id: "CLOCK-009"
+    relationship: "similar"
+    description: "Same issue with distributed locks"
+
+related_incidents:
+  - url: "https://arpitbhayani.me/blogs/clock-sync-nightmare/"
+    title: "Clock synchronization nightmares"
+  - url: "https://www.yugabyte.com/blog/evolving-clock-sync-for-distributed-databases/"
+    title: "YugabyteDB clock sync evolution"
+
+tags:
+  - "clock-skew"
+  - "distributed-time"
+  - "CRDT"
+  - "LWW"
+  - "HLC"
+  - "lamport-clock"
+  - "conflict-resolution"

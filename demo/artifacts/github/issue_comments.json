@@ -1,0 +1,50 @@
+[
+  {
+    "id": 5198755,
+    "body": "Thanks for the report! I've added this to our triage queue.\n\nA few questions:\n1. How frequently does this occur?\n2. Are both users on the same network?\n3. Can you share any logs from when this happens?\n\ncc @oncall-engineer for investigation.",
+    "user": {
+      "login": "maintainer"
+    },
+    "created_at": "2026-02-05T17:17:25.398049Z"
+  },
+  {
+    "id": 2268956,
+    "body": "I can reproduce this consistently when collaborating with another user.",
+    "user": {
+      "login": "affected-user"
+    },
+    "created_at": "2026-02-05T17:26:25.398049Z"
+  },
+  {
+    "id": 1311532,
+    "body": "I'm investigating this now.\n\nInitial findings:\n- Error rate spiked around the time of the report\n- Seeing `WARN.*buffer ownership conflict detected` in logs\n- Appears to correlate with concurrent buffer operations\n\nWill update once I have more info.",
+    "user": {
+      "login": "oncall-engineer"
+    },
+    "created_at": "2026-02-05T17:43:25.398049Z"
+  },
+  {
+    "id": 8439863,
+    "body": "This looks familiar. I think I've seen this before in the lock acquisition code.\n\n@oncall-engineer check `crates/collab/src/db/buffers.rs` - specifically look at how we check availability before acquiring a lock. There might be a race window there.",
+    "user": {
+      "login": "senior-dev"
+    },
+    "created_at": "2026-02-05T18:05:25.398049Z"
+  },
+  {
+    "id": 3952030,
+    "body": "Found it! This is a classic TOCTOU (Time-of-check to time-of-use) bug.\n\n**The Problem:**\n```\n1. Check if buffer available (separate query)\n2. If yes, acquire lock (another query)\n```\n\nBetween steps 1 and 2, another request can swoop in and grab the lock.\n\n**The Fix:**\nMake the check-and-acquire atomic using a single `UPDATE ... WHERE ... RETURNING` query.\n\nPR incoming.",
+    "user": {
+      "login": "oncall-engineer"
+    },
+    "created_at": "2026-02-05T19:06:25.398049Z"
+  },
+  {
+    "id": 2420207,
+    "body": "Fix PR opened: #4528\n\nThe fix makes lock acquisition atomic and adds concurrent tests to prevent regression.\n\nWill close this issue once the PR is merged.",
+    "user": {
+      "login": "oncall-engineer"
+    },
+    "created_at": "2026-02-05T19:43:25.398049Z"
+  }
+]

@@ -1,0 +1,49 @@
+{
+  "id": "cf1c4dcc",
+  "shortId": "ZED-9981",
+  "title": "WARN buffer ownership conflict detected",
+  "culprit": "crates/collab/src/db/buffers.rs",
+  "metadata": {
+    "type": "ConcurrencyError",
+    "value": "WARN buffer ownership conflict detected",
+    "filename": "buffers.rs",
+    "function": "acquire_buffer_lock"
+  },
+  "count": 284,
+  "userCount": 89,
+  "firstSeen": "2026-02-05T18:06:25.394071Z",
+  "lastSeen": "2026-02-05T19:59:25.394071Z",
+  "level": "error",
+  "status": "unresolved",
+  "isUnhandled": true,
+  "platform": "rust",
+  "project": {
+    "id": "0d2ad3",
+    "name": "zed",
+    "slug": "zed"
+  },
+  "tags": [
+    [
+      "environment",
+      "production"
+    ],
+    [
+      "server_name",
+      "collab-5"
+    ],
+    [
+      "release",
+      "v0.122.1"
+    ],
+    [
+      "transaction",
+      "/api/buffers/acquire"
+    ],
+    [
+      "pattern_category",
+      "Distributed System Failures"
+    ]
+  ],
+  "assignedTo": null,
+  "annotations": []
+}

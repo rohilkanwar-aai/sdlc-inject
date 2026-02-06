@@ -1,0 +1,138 @@
+id: RACE-005
+version: "1.0"
+name: "Extension load/unload race"
+category: "Distributed System Failures"
+subcategory: "Race Conditions"
+
+sdlc_phases:
+  primary: "Debugging"
+  secondary: ["Maintenance"]
+
+description: |
+  When an extension is being unloaded while simultaneously being accessed
+  by editor features, a use-after-free or null pointer situation occurs.
+  The extension manager doesn't properly synchronize the unload operation
+  with active feature usage.
+
+target_codebase:
+  name: "zed"
+  min_version: "0.120.0"
+  language: "rust"
+
+injection:
+  files:
+    - path: "crates/extension/src/manager.rs"
+      patches:
+        - type: "replace"
+          old: "async fn unload_extension(&mut self, ext_id: ExtensionId) -> Result<()> {"
+          new: |
+            async fn unload_extension(&mut self, ext_id: ExtensionId) -> Result<()> {
+                // Bug: Removes extension before notifying users
+                self.extensions.remove(&ext_id);
+
+                // Race window: extension may be accessed here
+                // Notification happens after removal
+                self.notify_unload(ext_id).await;
+
+                Ok(())
+            }
+
+    - path: "crates/extension/src/host.rs"
+      patches:
+        - type: "replace"
+          old: "fn get_extension(&self, ext_id: ExtensionId) -> Option<&Extension> {"
+          new: |
+            fn get_extension(&self, ext_id: ExtensionId) -> Option<&Extension> {
+                // Bug: No synchronization with unload
+                // Can return None unexpectedly during unload
+                self.extensions.get(&ext_id)
+            }
+
+  obfuscation:
+    strategy: "code_ordering"
+
+trigger:
+  conditions:
+    - "Extension being unloaded (update, disable, or remove)"
+    - "Editor feature using extension concurrently"
+    - "Timing: feature access during unload window"
+
+  reproduction_steps:
+    - step: 1
+      action: "Install extension that provides syntax highlighting"
+    - step: 2
+      action: "Open file using that syntax"
+    - step: 3
+      action: "While file is open, uninstall extension"
+    - step: 4
+      action: "Observe crash or visual glitch"
+
+observable_symptoms:
+  user_visible:
+    - symptom: "Editor crashes when extension updated"
+    - symptom: "Syntax highlighting disappears unexpectedly"
+    - symptom: "Extension features stop working mid-operation"
+
+  log_messages:
+    - pattern: "ERROR.*extension not found.*during operation"
+      level: "error"
+    - pattern: "PANIC.*unwrap.*None.*extension"
+      level: "error"
+
+difficulty:
+  estimated_human_time_hours: 2
+  frontier_model_pass_rate_percent: 35
+
+golden_path:
+  steps:
+    - step: 1
+      action: "Reproduce by unloading extension during use"
+    - step: 2
+      action: "Add logging to trace extension access vs unload timing"
+    - step: 3
+      action: "Identify lack of synchronization"
+    - step: 4
+      action: "Implement proper unload coordination"
+      solutions:
+        preferred: |
+          async fn unload_extension(&mut self, ext_id: ExtensionId) -> Result<()> {
+              // Mark as unloading first
+              if let Some(ext) = self.extensions.get_mut(&ext_id) {
+                  ext.state = ExtensionState::Unloading;
+              }
+
+              // Wait for active users to finish
+              self.wait_for_users(ext_id).await;
+
+              // Now safe to remove
+              self.extensions.remove(&ext_id);
+
+              // Notify after removal
+              self.notify_unload(ext_id).await;
+
+              Ok(())
+          }
+
+grading:
+  outcome_based:
+    - criterion: "No crash during extension unload"
+      weight: 0.50
+    - criterion: "Active operations complete before unload"
+      weight: 0.30
+
+  process_based:
+    - criterion: "Identified synchronization gap"
+      weight: 0.20
+
+hints:
+  progressive:
+    - level: 1
+      content: "What happens to in-flight operations when an extension is removed?"
+    - level: 2
+      content: "The unload happens before users are notified to stop using the extension."
+
+tags:
+  - "race-condition"
+  - "extension"
+  - "lifecycle"
+  - "use-after-free"

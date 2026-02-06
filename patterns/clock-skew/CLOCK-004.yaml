@@ -1,0 +1,157 @@
+id: CLOCK-004
+version: "1.0"
+name: "Rate limiter bypass with backward clock jump"
+category: "Distributed System Failures"
+subcategory: "Clock Skew & Time Issues"
+
+sdlc_phases:
+  primary: "Debugging"
+  secondary: ["Maintenance", "Verification"]
+
+description: |
+  A rate limiter that tracks request timestamps using wall clock time can be
+  bypassed when the clock jumps backward. Requests made "in the future" (from
+  the new clock's perspective) are not counted, allowing unlimited requests
+  until the clock catches up.
+
+target_codebase:
+  name: "zed"
+  min_version: "0.120.0"
+  language: "rust"
+
+injection:
+  files:
+    - path: "crates/client/src/rate_limit.rs"
+      patches:
+        - type: "replace"
+          old: "fn check_rate_limit(&mut self, key: &str) -> bool {"
+          new: |
+            fn check_rate_limit(&mut self, key: &str) -> bool {
+                let now = SystemTime::now();
+                let window_start = now - self.window_duration;
+
+                // Bug: Removes requests "in the future" if clock went backward
+                self.requests.retain(|ts| *ts > window_start);
+
+                // If clock jumped back, all recent requests are "in the future"
+                // and get retained, but window_start is in the past
+                // Actually: requests appear to be AFTER window_start,
+                // so they're kept. But now > requests, so...
+
+                // Actually the bug is: if clock goes backward significantly,
+                // requests from the "future" (old time) may not be in window
+                let recent_count = self.requests
+                    .iter()
+                    .filter(|ts| **ts > window_start && **ts <= now)
+                    .count();
+
+                // Bug: Requests recorded at old (higher) time are > now
+                // so they fail the **ts <= now check and aren't counted
+
+                if recent_count < self.max_requests {
+                    self.requests.push(now);
+                    true
+                } else {
+                    false
+                }
+
+  obfuscation:
+    strategy: "code_ordering"
+
+trigger:
+  conditions:
+    - "Clock jumps backward more than rate limit window"
+    - "Many requests were made before clock jump"
+
+  reproduction_steps:
+    - step: 1
+      action: "Make requests up to rate limit"
+    - step: 2
+      action: "Jump clock backward 1 hour"
+      command: "sudo date -s '-1 hour'"
+    - step: 3
+      action: "Make unlimited requests (rate limiter bypassed)"
+
+observable_symptoms:
+  user_visible:
+    - symptom: "Rate limiting suddenly stops working"
+    - symptom: "API abuse possible after clock adjustment"
+
+  log_messages:
+    - pattern: "DEBUG.*rate limit check.*recent_count=0"
+      level: "debug"
+    - pattern: "WARN.*clock appears to have jumped"
+      level: "warn"
+
+  metrics:
+    - name: "rate_limit_bypasses"
+      type: "counter"
+      anomaly: "Increases after clock events"
+
+difficulty:
+  estimated_human_time_hours: 1.5
+  frontier_model_pass_rate_percent: 45
+
+golden_path:
+  steps:
+    - step: 1
+      action: "Reproduce with clock manipulation"
+    - step: 2
+      action: "Trace rate limiter logic"
+    - step: 3
+      action: "Identify wall clock dependency"
+    - step: 4
+      action: "Implement monotonic sliding window"
+      solutions:
+        preferred: |
+          struct RateLimiter {
+              requests: VecDeque<Instant>,  // Monotonic
+              window_duration: Duration,
+              max_requests: usize,
+          }
+
+          fn check_rate_limit(&mut self) -> bool {
+              let now = Instant::now();
+
+              // Remove old entries
+              while let Some(front) = self.requests.front() {
+                  if now.duration_since(*front) > self.window_duration {
+                      self.requests.pop_front();
+                  } else {
+                      break;
+                  }
+              }
+
+              if self.requests.len() < self.max_requests {
+                  self.requests.push_back(now);
+                  true
+              } else {
+                  false
+              }
+          }
+
+grading:
+  outcome_based:
+    - criterion: "Rate limit enforced after clock jump"
+      weight: 0.50
+    - criterion: "No bypass possible"
+      weight: 0.25
+
+  process_based:
+    - criterion: "Identified clock dependency"
+      weight: 0.15
+    - criterion: "Used Instant for tracking"
+      weight: 0.10
+
+hints:
+  progressive:
+    - level: 1
+      content: "What happens to the sliding window if time goes backward?"
+    - level: 2
+      content: "Requests made at the old time are 'in the future' now."
+
+tags:
+  - "clock-skew"
+  - "rate-limiting"
+  - "security"
+  - "bypass"

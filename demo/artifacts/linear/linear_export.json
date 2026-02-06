@@ -1,0 +1,191 @@
+{
+  "issue": {
+    "id": "1f5b39a5-96e7-f921-47f7-a0f1c0c0f5f9",
+    "identifier": "ENG-6719",
+    "title": "[Incident] Check-then-act buffer ownership race",
+    "description": "## Summary\n\nA race condition in buffer ownership checking allows two users to\nsimultaneously claim ownership of the same buffer, leading to\nconflicting edits and potential data loss. The bug occurs because\nthe ownership check and acquisition are not atomic operations.\n\n\n## Symptoms Reported\n\n- Edits appear then disappear (Every occurrence)\n- Cursor jumps unexpectedly to other user's position (Intermittent)\n- Undo doesn't restore expected state (When conflict occurs)\n- Content appears duplicated or garbled (Severe cases)\n\n\n## Trigger Conditions\n\n- Two users connected to same project (Required)\n- Both attempt to open same file within 100ms window (Required)\n- Network latency > 20ms between clients and server (Optional)\n\n\n## Impact\n\n- **Affected Users:** ~286 users\n- **Error Rate:** 2.5%\n- **Duration:** ~2 hours (ongoing)\n\n## Investigation Notes\n\nSee Slack thread: #incident-race-001-514\n\n## References\n\n- Sentry Issue: [View in Sentry](https://sentry.io/issues/8c2a693f)\n- Dashboard: [Grafana](https://grafana.internal/d/race-001)\n- Runbook: [On-Call Runbook](https://docs.internal/runbooks/distributed-system-failures)\n",
+    "state": {
+      "name": "In Progress",
+      "type": "started"
+    },
+    "priority": 1,
+    "priorityLabel": "Urgent",
+    "labels": [
+      {
+        "id": "1",
+        "name": "incident",
+        "color": "#FF0000"
+      },
+      {
+        "id": "2",
+        "name": "sev-2",
+        "color": "#FFA500"
+      },
+      {
+        "id": "3",
+        "name": "distributed-system-failures",
+        "color": "#0000FF"
+      },
+      {
+        "id": "10",
+        "name": "race-condition",
+        "color": "#808080"
+      },
+      {
+        "id": "11",
+        "name": "check-then-act",
+        "color": "#808080"
+      },
+      {
+        "id": "12",
+        "name": "TOCTOU",
+        "color": "#808080"
+      }
+    ],
+    "assignee": {
+      "id": "37a541bd",
+      "name": "On-Call Engineer",
+      "email": "oncall@company.com"
+    },
+    "creator": {
+      "id": "8bbe6135",
+      "name": "Incident Bot",
+      "email": "incidents@company.com"
+    },
+    "team": {
+      "id": "68d16eb0",
+      "name": "Platform",
+      "key": "ENG"
+    },
+    "project": {
+      "id": "baff6c0c",
+      "name": "zed"
+    },
+    "createdAt": "2026-02-05T18:09:25.395862Z",
+    "updatedAt": "2026-02-05T20:05:25.395862Z",
+    "startedAt": "2026-02-05T18:12:25.395862Z",
+    "estimate": 3.0,
+    "cycle": {
+      "id": "aa892ee1",
+      "name": "Sprint 23"
+    },
+    "parent": null,
+    "children": [],
+    "attachments": [
+      {
+        "id": "6102e488",
+        "title": "Grafana Dashboard Screenshot",
+        "url": "https://attachments.linear.app/553b06a3-b67e-9aa7-9c11-9462b043421c/dashboard.png",
+        "type": "image/png"
+      },
+      {
+        "id": "81474f22",
+        "title": "Sentry Error Export",
+        "url": "https://attachments.linear.app/b77681dd-090e-fe82-44b0-cebf5356e21f/sentry_export.json",
+        "type": "application/json"
+      }
+    ],
+    "url": "https://linear.app/company/issue/ENG-5884"
+  },
+  "comments": [
+    {
+      "id": "dc968910",
+      "body": "Acknowledged. Starting investigation.",
+      "user": {
+        "id": "5104311e",
+        "name": "On-Call Engineer"
+      },
+      "createdAt": "2026-02-05T18:18:25.395862Z"
+    },
+    {
+      "id": "73d16238",
+      "body": "## Investigation Update\n\n### Metrics Analysis\n- Error rate elevated on buffer acquisition endpoint\n- Connection pool utilization at 100%\n- Latency p99 increased 40x\n\n### Log Analysis\nFound correlated errors:\n```\nWARN.*buffer ownership conflict detected\n```\n\n### Hypothesis\nPossible resource contention under high concurrency.\n",
+      "user": {
+        "id": "a9feae5a",
+        "name": "On-Call Engineer"
+      },
+      "createdAt": "2026-02-05T18:37:25.395862Z"
+    },
+    {
+      "id": "0a5f39c1",
+      "body": "This looks like a race condition we've seen before.\n\nCheck `crates/collab/src/db/buffers.rs` - specifically the lock acquisition logic.\n\nLook for:\n1. Separate check and acquire operations\n2. Missing transaction boundaries\n3. Non-atomic updates\n",
+      "user": {
+        "id": "c21fe091",
+        "name": "Senior Engineer"
+      },
+      "createdAt": "2026-02-05T19:11:25.395862Z"
+    },
+    {
+      "id": "0e91adc0",
+      "body": "## Root Cause Identified\n\nFound a TOCTOU (Time-of-check to time-of-use) race condition.\n\n### The Bug\n```\n1. Check if resource available (Query 1)\n2. If available, acquire lock (Query 2)\n```\n\nBetween steps 1 and 2, another request can acquire the lock.\n\n### The Fix\nMake check-and-acquire atomic using `SELECT ... FOR UPDATE` or single `UPDATE ... WHERE ... RETURNING`.\n\nPR in progress.\n",
+      "user": {
+        "id": "ca3be87d",
+        "name": "On-Call Engineer"
+      },
+      "createdAt": "2026-02-05T19:41:25.395862Z"
+    },
+    {
+      "id": "6c1e27b7",
+      "body": "## Fix Update\n\nPR opened: #2688\n\nChanges:\n- Replaced check-then-acquire with atomic operation\n- Added concurrent test\n- Updated metrics for better observability\n\nCurrently in review. Will deploy once approved.\n",
+      "user": {
+        "id": "11b491d4",
+        "name": "On-Call Engineer"
+      },
+      "createdAt": "2026-02-05T19:58:25.395862Z"
+    }
+  ],
+  "activity": [
+    {
+      "id": "cdfa4571",
+      "type": "created",
+      "description": "Issue created from incident alert",
+      "createdAt": "2026-02-05T18:03:25.395862Z"
+    },
+    {
+      "id": "9fb6166d",
+      "type": "state_change",
+      "description": "Status changed from Triage to In Progress",
+      "createdAt": "2026-02-05T18:17:25.395862Z"
+    },
+    {
+      "id": "d3ad48dd",
+      "type": "assignee_change",
+      "description": "Assigned to On-Call Engineer",
+      "createdAt": "2026-02-05T18:10:25.395862Z"
+    },
+    {
+      "id": "80e6916d",
+      "type": "label_added",
+      "description": "Added label: investigation",
+      "createdAt": "2026-02-05T18:42:25.395862Z"
+    },
+    {
+      "id": "badbe685",
+      "type": "label_added",
+      "description": "Added label: root-cause-found",
+      "createdAt": "2026-02-05T19:43:25.395862Z"
+    },
+    {
+      "id": "90a3ca75",
+      "type": "attachment_added",
+      "description": "Added PR link",
+      "createdAt": "2026-02-05T19:54:25.395862Z"
+    }
+  ],
+  "related_issues": [
+    {
+      "id": "e365a596",
+      "identifier": "ENG-582",
+      "title": "[Investigation] RACE-002: Same check-then-act pattern but in ID generation",
+      "relationship": "similar",
+      "state": "Backlog"
+    },
+    {
+      "id": "d43c8501",
+      "identifier": "ENG-402",
+      "title": "[Investigation] COORD-007: Delete + edit race can compound with this",
+      "relationship": "compound",
+      "state": "Backlog"
+    }
+  ]
+}

@@ -1,0 +1,257 @@
+id: SPLIT-002
+version: "1.0"
+name: "Asymmetric network partition (cursor visible, edits lost)"
+category: "Distributed System Failures"
+subcategory: "Split-Brain & Network Partitions"
+
+sdlc_phases:
+  primary: "Debugging"
+  secondary: ["Maintenance", "Verification"]
+
+description: |
+  An asymmetric network partition occurs where one direction of communication
+  works while the other fails. Client A can send to server but server responses
+  don't reach client A. This creates a scenario where user sees their cursor
+  moving on collaborators' screens but their edits silently disappear because
+  acknowledgments never arrive and the client eventually times out.
+
+target_codebase:
+  name: "zed"
+  min_version: "0.120.0"
+  language: "rust"
+
+injection:
+  files:
+    - path: "crates/collab/src/rpc/connection.rs"
+      patches:
+        - type: "replace"
+          old: "async fn send_message(&mut self, msg: Message) -> Result<()> {"
+          new: |
+            async fn send_message(&mut self, msg: Message) -> Result<()> {
+                // Bug: Fire-and-forget for cursor updates, no delivery confirmation
+                if matches!(msg, Message::CursorUpdate(_)) {
+                    self.socket.send(msg.encode()).await?;
+                    return Ok(()); // No ACK waiting
+                }
+
+    - path: "crates/collab/src/rpc/protocol.rs"
+      patches:
+        - type: "replace"
+          old: "fn handle_edit_timeout(&mut self, edit_id: EditId) {"
+          new: |
+            fn handle_edit_timeout(&mut self, edit_id: EditId) {
+                // Bug: Silently drops edit on timeout instead of notifying user
+                self.pending_edits.remove(&edit_id);
+                // Missing: self.notify_edit_failed(edit_id);
+
+  config_changes:
+    - file: "crates/collab/src/config.rs"
+      changes:
+        - key: "EDIT_ACK_TIMEOUT_MS"
+          old_value: "5000"
+          new_value: "500"
+          comment: "Reduced timeout makes asymmetric partition more likely to cause issues"
+
+  obfuscation:
+    strategy: "simplification"
+    techniques:
+      - type: "comment_misdirection"
+        content: "// Performance optimization: cursor updates don't need acknowledgment"
+        location: "near_injection"
+
+trigger:
+  conditions:
+    - description: "Asymmetric network path (send works, receive fails)"
+      required: true
+    - description: "User actively editing during partition"
+      required: true
+    - description: "Partition duration > ACK timeout"
+      increases_probability: true
+
+  reproduction_steps:
+    - step: 1
+      action: "Set up network partition using tc/iptables"
+      command: "sudo iptables -A INPUT -p tcp --sport 443 -j DROP"
+    - step: 2
+      action: "User A types in shared document"
+    - step: 3
+      action: "Observe User A's cursor visible to User B"
+    - step: 4
+      action: "After timeout, User A's edits silently disappear"
+
+  expected_frequency: "~5% of sessions with poor network"
+
+observable_symptoms:
+  user_visible:
+    - symptom: "Edits disappear after a few seconds"
+      frequency: "Every edit during partition"
+    - symptom: "Cursor visible to collaborators but text isn't"
+      frequency: "During asymmetric partition"
+    - symptom: "No error message shown to user"
+      frequency: "Always (silent failure)"
+
+  log_messages:
+    - pattern: "DEBUG.*edit timeout.*pending_edits"
+      level: "debug"
+      file: "collab/rpc/protocol.rs"
+    - pattern: "TRACE.*cursor update sent.*no ack required"
+      level: "trace"
+
+  metrics:
+    - name: "edit_timeouts_total"
+      type: "counter"
+      anomaly: "Spikes during network issues"
+    - name: "cursor_updates_sent"
+      type: "counter"
+      description: "Much higher than edit_acks_received during partition"
+
+difficulty:
+  estimated_human_time_hours: 4
+  frontier_model_pass_rate_percent: 20
+  complexity_factors:
+    - "Asymmetric partition is counterintuitive"
+    - "Silent failure masks the problem"
+    - "Cursor visibility creates false confidence"
+    - "Requires network-level thinking"
+
+failure_modes:
+  common:
+    - mode: "Blame server"
+      description: "Assumes server is dropping edits"
+      detection: "Server logs show edits were received"
+    - mode: "Focus on cursor sync"
+      description: "Investigates why cursor works but edits don't"
+      detection: "Cursor and edits take different code paths"
+  subtle:
+    - mode: "Add retry without idempotency"
+      description: "Retrying may cause duplicate edits"
+      detection: "Duplicate content in document"
+
+golden_path:
+  overview: "Trace the asymmetry between cursor and edit handling"
+  steps:
+    - step: 1
+      action: "Reproduce with network simulation"
+      details: "Use tc to create asymmetric latency or drop"
+      tools: ["tc", "iptables"]
+      commands:
+        - "sudo tc qdisc add dev eth0 root netem loss 100% incoming"
+
+    - step: 2
+      action: "Compare cursor vs edit code paths"
+      details: "Notice cursor is fire-and-forget, edits wait for ACK"
+      tools: ["code search"]
+      search_queries:
+        - "send_message.*CursorUpdate"
+        - "edit.*timeout"
+
+    - step: 3
+      action: "Identify silent timeout handling"
+      details: "Edit timeout removes from pending without notification"
+      key_insight: "User should be notified when edits fail"
+
+    - step: 4
+      action: "Implement proper failure notification"
+      solutions:
+        preferred: |
+          fn handle_edit_timeout(&mut self, edit_id: EditId) {
+              if let Some(edit) = self.pending_edits.remove(&edit_id) {
+                  // Queue for retry with exponential backoff
+                  self.retry_queue.push(RetryableEdit {
+                      edit,
+                      attempts: 1,
+                      next_retry: Instant::now() + Duration::from_millis(100),
+                  });
+                  // Notify user of potential issue
+                  self.ui_notifications.send(Notification::EditDelayed {
+                      edit_id,
+                      reason: "Network issues detected",
+                  });
+              }
+          }
+        alternative: |
+          // Simpler: Just notify user immediately
+          fn handle_edit_timeout(&mut self, edit_id: EditId) {
+              self.pending_edits.remove(&edit_id);
+              self.show_error("Edit may not have been saved. Check your connection.");
+          }
+
+    - step: 5
+      action: "Add delivery confirmation for critical operations"
+      details: "Edits should require ACK like RPCs"
+      verification: "Test with simulated packet loss"
+
+grading:
+  outcome_based:
+    - criterion: "User notified of edit failures"
+      weight: 0.35
+      verification:
+        type: "ui_test"
+        description: "Error shown when edit times out"
+
+    - criterion: "Edits retried or recoverable"
+      weight: 0.25
+      verification:
+        type: "integration_test"
+        description: "Edits survive temporary network issues"
+
+    - criterion: "No silent data loss"
+      weight: 0.20
+      verification:
+        type: "chaos_test"
+        command: "cargo test --features chaos edit_delivery"
+
+  process_based:
+    - criterion: "Identified asymmetric partition scenario"
+      weight: 0.10
+      evidence_patterns:
+        - "asymmetric"
+        - "one-way"
+        - "send works.*receive fails"
+
+    - criterion: "Traced cursor vs edit code paths"
+      weight: 0.10
+      evidence_patterns:
+        - "CursorUpdate.*different"
+        - "fire-and-forget"
+
+hints:
+  progressive:
+    - level: 1
+      trigger: "After 45 minutes with no progress"
+      content: "Why would cursor position be visible but edits not apply?"
+
+    - level: 2
+      trigger: "After 90 minutes with no progress"
+      content: "Check how cursor updates vs text edits handle acknowledgments."
+
+    - level: 3
+      trigger: "After 120 minutes with no progress"
+      content: "The edit timeout handler silently discards failed edits."
+
+environment:
+  docker:
+    services:
+      - name: "collab-server"
+        image: "zed-collab:injected"
+        ports: ["8080:8080"]
+      - name: "toxiproxy"
+        image: "ghcr.io/shopify/toxiproxy:2.5.0"
+        ports: ["8474:8474"]
+
+  network_simulation:
+    tool: "toxiproxy"
+    scenarios:
+      - name: "asymmetric_partition"
+        toxic:
+          type: "timeout"
+          attributes:
+            timeout: 0
+          upstream: "downstream_only"
+
+tags:
+  - "split-brain"
+  - "network-partition"
+  - "asymmetric"
+  - "silent-failure"
+  - "data-loss"

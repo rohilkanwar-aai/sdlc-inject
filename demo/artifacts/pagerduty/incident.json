@@ -1,0 +1,46 @@
+{
+  "id": "565bea47-ae4b-4777-306b-2be19c5c8008",
+  "incident_number": 28959,
+  "title": "[SEV-2] Check-then-act buffer ownership race",
+  "description": "Automated alert triggered by monitoring.\n\n**Service:** zed\n**Pattern:** RACE-001\n\n**Triggering Metrics:**\n- buffer_conflicts_total: > 0\n- buffer_lock_retries_total: anomaly detected\n- buffer_acquisition_duration_seconds: anomaly detected\n\n\n**Potential Impact:**\n- User-facing service degradation\n- Buffer operations failing intermittently\n- Estimated 156 users affected\n\n**Runbook:** https://docs.internal/runbooks/distributed-system-failures\n",
+  "status": "acknowledged",
+  "urgency": "high",
+  "priority": {
+    "id": "P2",
+    "name": "SEV-2",
+    "description": "High impact, requires immediate attention"
+  },
+  "service": {
+    "id": "00ca2b32",
+    "name": "zed",
+    "description": "Collaborative editing service"
+  },
+  "escalation_policy": {
+    "id": "a85a78b9",
+    "name": "Platform Engineering"
+  },
+  "created_at": "2026-02-05T18:09:25.396293Z",
+  "updated_at": "2026-02-05T20:04:25.396293Z",
+  "last_status_change_at": "2026-02-05T18:12:25.396293Z",
+  "acknowledgements": [
+    {
+      "at": "2026-02-05T18:16:25.396293Z",
+      "acknowledger": {
+        "id": "f2f5aa5b",
+        "type": "user_reference",
+        "name": "On-Call Engineer"
+      }
+    }
+  ],
+  "assignments": [
+    {
+      "at": "2026-02-05T18:12:25.396293Z",
+      "assignee": {
+        "id": "a17a336a",
+        "type": "user_reference",
+        "name": "On-Call Engineer"
+      }
+    }
+  ],
+  "html_url": "https://company.pagerduty.com/incidents/37944"
+}

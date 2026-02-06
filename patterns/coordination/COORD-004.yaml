@@ -1,0 +1,195 @@
+id: COORD-004
+version: "1.0"
+name: "Vector clock overflow causes ordering confusion"
+category: "Distributed System Failures"
+subcategory: "Consensus & Coordination Failures"
+
+sdlc_phases:
+  primary: "Debugging"
+  secondary: ["Maintenance"]
+
+description: |
+  The vector clock implementation uses fixed-size integers that can overflow
+  after a long-running session with many operations. When overflow occurs,
+  the clock wraps around, causing newer events to appear older than ancient
+  events, breaking causal ordering guarantees.
+
+target_codebase:
+  name: "zed"
+  min_version: "0.120.0"
+  language: "rust"
+
+injection:
+  files:
+    - path: "crates/text/src/vector_clock.rs"
+      patches:
+        - type: "replace"
+          old: "pub fn increment(&mut self, node_id: NodeId) {"
+          new: |
+            pub fn increment(&mut self, node_id: NodeId) {
+                // Bug: Uses u32 which can overflow after ~4 billion operations
+                let counter = self.counters.entry(node_id).or_insert(0u32);
+                *counter = counter.wrapping_add(1);  // Silent overflow!
+                // Missing: overflow detection and recovery
+
+        - type: "replace"
+          old: "pub fn compare(&self, other: &VectorClock) -> Ordering {"
+          new: |
+            pub fn compare(&self, other: &VectorClock) -> Ordering {
+                // Bug: Doesn't handle overflow case where counter wrapped
+                let mut dominated = false;
+                let mut dominates = false;
+
+                for node_id in self.counters.keys().chain(other.counters.keys()) {
+                    let self_count = self.counters.get(node_id).copied().unwrap_or(0);
+                    let other_count = other.counters.get(node_id).copied().unwrap_or(0);
+
+                    // After overflow: self_count might be small (wrapped)
+                    // but logically represents a much larger value
+                    if self_count > other_count {
+                        dominates = true;
+                    } else if self_count < other_count {
+                        dominated = true;
+                    }
+                }
+
+                if dominates && !dominated { Ordering::Greater }
+                else if dominated && !dominates { Ordering::Less }
+                else if !dominates && !dominated { Ordering::Equal }
+                else { Ordering::Equal }  // Concurrent - Bug: should be separate variant
+
+trigger:
+  conditions:
+    - "Very long editing session (millions of operations)"
+    - "Counter approaches u32::MAX"
+    - "Fast automated editing (macros, find-replace)"
+
+  reproduction_steps:
+    - step: 1
+      action: "Artificially set vector clock counter near u32::MAX"
+    - step: 2
+      action: "Perform several operations to cause overflow"
+    - step: 3
+      action: "New operations now have smaller clock than old ones"
+    - step: 4
+      action: "Merge incorrectly orders operations"
+
+observable_symptoms:
+  user_visible:
+    - symptom: "Recent edits appear 'before' ancient edits in history"
+    - symptom: "Merge conflicts on non-conflicting edits"
+    - symptom: "Undo/redo behaves erratically"
+
+  log_messages:
+    - pattern: "DEBUG.*vector clock compare.*counter \\d+"
+      level: "debug"
+    - pattern: "WARN.*unexpected ordering.*vector clock"
+      level: "warn"
+
+  metrics:
+    - name: "vector_clock_max_counter"
+      type: "gauge"
+      anomaly: "Drops suddenly (overflow)"
+
+difficulty:
+  estimated_human_time_hours: 2.5
+  frontier_model_pass_rate_percent: 35
+
+failure_modes:
+  common:
+    - mode: "Use u64 instead"
+      description: "Delays problem but doesn't fix it"
+    - mode: "Reset clocks periodically"
+      description: "Loses causal information"
+
+golden_path:
+  steps:
+    - step: 1
+      action: "Identify overflow potential in vector clock"
+      tools: ["code review"]
+
+    - step: 2
+      action: "Write test that triggers overflow"
+      test_code: |
+        #[test]
+        fn test_vector_clock_overflow() {
+            let mut vc = VectorClock::new();
+            vc.counters.insert(NodeId(1), u32::MAX - 1);
+
+            vc.increment(NodeId(1));
+            assert_eq!(vc.counters[&NodeId(1)], u32::MAX);
+
+            vc.increment(NodeId(1));  // Overflow!
+            // Should handle gracefully, not wrap to 0
+        }
+
+    - step: 3
+      action: "Implement overflow-safe vector clock"
+      solutions:
+        preferred: |
+          // Use u128 with epoch for practically unlimited range
+          pub struct VectorClock {
+              epoch: u64,
+              counters: HashMap<NodeId, u64>,
+          }
+
+          pub fn increment(&mut self, node_id: NodeId) {
+              let counter = self.counters.entry(node_id).or_insert(0);
+              match counter.checked_add(1) {
+                  Some(new_val) => *counter = new_val,
+                  None => {
+                      // Overflow! Start new epoch
+                      self.epoch += 1;
+                      *counter = 0;
+                      self.broadcast_epoch_change();
+                  }
+              }
+          }
+
+          pub fn compare(&self, other: &VectorClock) -> ClockOrdering {
+              // First compare epochs
+              if self.epoch != other.epoch {
+                  return if self.epoch > other.epoch {
+                      ClockOrdering::Greater
+                  } else {
+                      ClockOrdering::Less
+                  };
+              }
+              // Then compare counters
+              // ...existing logic with Concurrent variant
+          }
+
+        alternative: |
+          // Simpler: detect overflow and refuse to continue
+          pub fn increment(&mut self, node_id: NodeId) -> Result<(), ClockOverflow> {
+              let counter = self.counters.entry(node_id).or_insert(0);
+              *counter = counter.checked_add(1)
+                  .ok_or(ClockOverflow)?;
+              Ok(())
+          }
+
+grading:
+  outcome_based:
+    - criterion: "No ordering violations after overflow"
+      weight: 0.40
+    - criterion: "Graceful handling of extreme counter values"
+      weight: 0.30
+
+  process_based:
+    - criterion: "Identified overflow vulnerability"
+      weight: 0.15
+    - criterion: "Wrote overflow test"
+      weight: 0.15
+
+hints:
+  progressive:
+    - level: 1
+      content: "What's the maximum value a u32 can hold? What happens after?"
+    - level: 2
+      content: "wrapping_add silently wraps around on overflow."
+
+tags:
+  - "coordination"
+  - "vector-clock"
+  - "overflow"
+  - "integer-wrap"

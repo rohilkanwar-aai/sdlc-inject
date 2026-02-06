@@ -1,0 +1,247 @@
+{
+  "incident": {
+    "id": "565bea47-ae4b-4777-306b-2be19c5c8008",
+    "incident_number": 28959,
+    "title": "[SEV-2] Check-then-act buffer ownership race",
+    "description": "Automated alert triggered by monitoring.\n\n**Service:** zed\n**Pattern:** RACE-001\n\n**Triggering Metrics:**\n- buffer_conflicts_total: > 0\n- buffer_lock_retries_total: anomaly detected\n- buffer_acquisition_duration_seconds: anomaly detected\n\n\n**Potential Impact:**\n- User-facing service degradation\n- Buffer operations failing intermittently\n- Estimated 156 users affected\n\n**Runbook:** https://docs.internal/runbooks/distributed-system-failures\n",
+    "status": "acknowledged",
+    "urgency": "high",
+    "priority": {
+      "id": "P2",
+      "name": "SEV-2",
+      "description": "High impact, requires immediate attention"
+    },
+    "service": {
+      "id": "00ca2b32",
+      "name": "zed",
+      "description": "Collaborative editing service"
+    },
+    "escalation_policy": {
+      "id": "a85a78b9",
+      "name": "Platform Engineering"
+    },
+    "created_at": "2026-02-05T18:09:25.396293Z",
+    "updated_at": "2026-02-05T20:04:25.396293Z",
+    "last_status_change_at": "2026-02-05T18:12:25.396293Z",
+    "acknowledgements": [
+      {
+        "at": "2026-02-05T18:16:25.396293Z",
+        "acknowledger": {
+          "id": "f2f5aa5b",
+          "type": "user_reference",
+          "name": "On-Call Engineer"
+        }
+      }
+    ],
+    "assignments": [
+      {
+        "at": "2026-02-05T18:12:25.396293Z",
+        "assignee": {
+          "id": "a17a336a",
+          "type": "user_reference",
+          "name": "On-Call Engineer"
+        }
+      }
+    ],
+    "html_url": "https://company.pagerduty.com/incidents/37944"
+  },
+  "alerts": [
+    {
+      "id": "e6dd36b2-1806-ac1a-97db-ef9c25a70ff9",
+      "alert_key": "error_rate_high",
+      "type": "alert",
+      "status": "triggered",
+      "severity": "critical",
+      "summary": "Error rate > 5% on zed",
+      "source": "prometheus",
+      "created_at": "2026-02-05T18:03:25.396293Z",
+      "suppressed": false,
+      "body": {
+        "type": "alert_body",
+        "contexts": [
+          {
+            "type": "link",
+            "href": "https://grafana.internal/d/race-001",
+            "text": "View Dashboard"
+          },
+          {
+            "type": "link",
+            "href": "https://sentry.io/issues/?query=RACE-001",
+            "text": "View Sentry Errors"
+          },
+          {
+            "type": "link",
+            "href": "https://logs.internal/explore?pattern=RACE-001",
+            "text": "View Logs"
+          }
+        ],
+        "details": {
+          "alert_name": "High Error Rate",
+          "firing_value": 6.193380665734421,
+          "threshold": 5.0,
+          "environment": "production"
+        }
+      }
+    },
+    {
+      "id": "6e23942a-9d1c-83df-85c5-6ccb14272162",
+      "alert_key": "latency_p99_high",
+      "type": "alert",
+      "status": "triggered",
+      "severity": "critical",
+      "summary": "P99 latency > 2000ms",
+      "source": "prometheus",
+      "created_at": "2026-02-05T18:12:25.396293Z",
+      "suppressed": false,
+      "body": {
+        "type": "alert_body",
+        "contexts": [
+          {
+            "type": "link",
+            "href": "https://grafana.internal/d/race-001",
+            "text": "View Dashboard"
+          },
+          {
+            "type": "link",
+            "href": "https://sentry.io/issues/?query=RACE-001",
+            "text": "View Sentry Errors"
+          },
+          {
+            "type": "link",
+            "href": "https://logs.internal/explore?pattern=RACE-001",
+            "text": "View Logs"
+          }
+        ],
+        "details": {
+          "alert_name": "Latency Spike",
+          "firing_value": 18.334635047788012,
+          "threshold": 5.0,
+          "environment": "production"
+        }
+      }
+    },
+    {
+      "id": "8427b431-755e-c80d-134f-0779dff497b7",
+      "alert_key": "pool_exhaustion",
+      "type": "alert",
+      "status": "triggered",
+      "severity": "critical",
+      "summary": "Connection pool utilization at 100%",
+      "source": "prometheus",
+      "created_at": "2026-02-05T18:07:25.396293Z",
+      "suppressed": false,
+      "body": {
+        "type": "alert_body",
+        "contexts": [
+          {
+            "type": "link",
+            "href": "https://grafana.internal/d/race-001",
+            "text": "View Dashboard"
+          },
+          {
+            "type": "link",
+            "href": "https://sentry.io/issues/?query=RACE-001",
+            "text": "View Sentry Errors"
+          },
+          {
+            "type": "link",
+            "href": "https://logs.internal/explore?pattern=RACE-001",
+            "text": "View Logs"
+          }
+        ],
+        "details": {
+          "alert_name": "Connection Pool",
+          "firing_value": 18.53498499231629,
+          "threshold": 5.0,
+          "environment": "production"
+        }
+      }
+    }
+  ],
+  "timeline": [
+    {
+      "id": "b495d649",
+      "type": "incident.trigger",
+      "summary": "Incident triggered by alert: error_rate_high",
+      "created_at": "2026-02-05T18:08:25.396293Z"
+    },
+    {
+      "id": "18d5911d",
+      "type": "incident.delegate",
+      "summary": "Escalated to Platform Engineering on-call",
+      "created_at": "2026-02-05T18:13:25.396293Z"
+    },
+    {
+      "id": "659f9273",
+      "type": "incident.notify",
+      "summary": "Notification sent via SMS",
+      "created_at": "2026-02-05T18:11:25.396293Z"
+    },
+    {
+      "id": "7e4dda32",
+      "type": "incident.notify",
+      "summary": "Notification sent via Slack",
+      "created_at": "2026-02-05T18:12:25.396293Z"
+    },
+    {
+      "id": "bd433d17",
+      "type": "incident.acknowledge",
+      "summary": "Acknowledged by On-Call Engineer",
+      "created_at": "2026-02-05T18:14:25.396293Z"
+    },
+    {
+      "id": "146c2501",
+      "type": "annotate",
+      "summary": "Starting investigation - checking dashboards",
+      "created_at": "2026-02-05T18:10:25.396293Z"
+    },
+    {
+      "id": "9c36e0b8",
+      "type": "annotate",
+      "summary": "Identified elevated error rate on buffer endpoint",
+      "created_at": "2026-02-05T18:39:25.396293Z"
+    },
+    {
+      "id": "821f0455",
+      "type": "annotate",
+      "summary": "Root cause hypothesis: race condition in lock acquisition",
+      "created_at": "2026-02-05T19:04:25.396293Z"
+    },
+    {
+      "id": "1cc5f0a0",
+      "type": "annotate",
+      "summary": "Root cause confirmed - PR in progress",
+      "created_at": "2026-02-05T19:38:25.396293Z"
+    },
+    {
+      "id": "33b3b404",
+      "type": "annotate",
+      "summary": "Fix deployed to production",
+      "created_at": "2026-02-05T19:54:25.396293Z"
+    },
+    {
+      "id": "a7a6905a",
+      "type": "annotate",
+      "summary": "Monitoring - error rate returning to baseline",
+      "created_at": "2026-02-05T20:04:25.396293Z"
+    }
+  ],
+  "responders": [
+    {
+      "id": "07c2dd1d",
+      "type": "user_reference",
+      "name": "On-Call Engineer",
+      "email": "oncall@company.com",
+      "role": "Incident Commander",
+      "joined_at": "2026-02-05T18:08:25.396293Z"
+    },
+    {
+      "id": "ddae15fc",
+      "type": "user_reference",
+      "name": "Senior Engineer",
+      "email": "senior@company.com",
+      "role": "Subject Matter Expert",
+      "joined_at": "2026-02-05T18:28:25.396293Z"
+    }
+  ]
+}

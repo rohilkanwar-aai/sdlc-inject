@@ -1,0 +1,88 @@
+{
+  "id": "1f5b39a5-96e7-f921-47f7-a0f1c0c0f5f9",
+  "identifier": "ENG-6719",
+  "title": "[Incident] Check-then-act buffer ownership race",
+  "description": "## Summary\n\nA race condition in buffer ownership checking allows two users to\nsimultaneously claim ownership of the same buffer, leading to\nconflicting edits and potential data loss. The bug occurs because\nthe ownership check and acquisition are not atomic operations.\n\n\n## Symptoms Reported\n\n- Edits appear then disappear (Every occurrence)\n- Cursor jumps unexpectedly to other user's position (Intermittent)\n- Undo doesn't restore expected state (When conflict occurs)\n- Content appears duplicated or garbled (Severe cases)\n\n\n## Trigger Conditions\n\n- Two users connected to same project (Required)\n- Both attempt to open same file within 100ms window (Required)\n- Network latency > 20ms between clients and server (Optional)\n\n\n## Impact\n\n- **Affected Users:** ~286 users\n- **Error Rate:** 2.5%\n- **Duration:** ~2 hours (ongoing)\n\n## Investigation Notes\n\nSee Slack thread: #incident-race-001-514\n\n## References\n\n- Sentry Issue: [View in Sentry](https://sentry.io/issues/8c2a693f)\n- Dashboard: [Grafana](https://grafana.internal/d/race-001)\n- Runbook: [On-Call Runbook](https://docs.internal/runbooks/distributed-system-failures)\n",
+  "state": {
+    "name": "In Progress",
+    "type": "started"
+  },
+  "priority": 1,
+  "priorityLabel": "Urgent",
+  "labels": [
+    {
+      "id": "1",
+      "name": "incident",
+      "color": "#FF0000"
+    },
+    {
+      "id": "2",
+      "name": "sev-2",
+      "color": "#FFA500"
+    },
+    {
+      "id": "3",
+      "name": "distributed-system-failures",
+      "color": "#0000FF"
+    },
+    {
+      "id": "10",
+      "name": "race-condition",
+      "color": "#808080"
+    },
+    {
+      "id": "11",
+      "name": "check-then-act",
+      "color": "#808080"
+    },
+    {
+      "id": "12",
+      "name": "TOCTOU",
+      "color": "#808080"
+    }
+  ],
+  "assignee": {
+    "id": "37a541bd",
+    "name": "On-Call Engineer",
+    "email": "oncall@company.com"
+  },
+  "creator": {
+    "id": "8bbe6135",
+    "name": "Incident Bot",
+    "email": "incidents@company.com"
+  },
+  "team": {
+    "id": "68d16eb0",
+    "name": "Platform",
+    "key": "ENG"
+  },
+  "project": {
+    "id": "baff6c0c",
+    "name": "zed"
+  },
+  "createdAt": "2026-02-05T18:09:25.395862Z",
+  "updatedAt": "2026-02-05T20:05:25.395862Z",
+  "startedAt": "2026-02-05T18:12:25.395862Z",
+  "estimate": 3.0,
+  "cycle": {
+    "id": "aa892ee1",
+    "name": "Sprint 23"
+  },
+  "parent": null,
+  "children": [],
+  "attachments": [
+    {
+      "id": "6102e488",
+      "title": "Grafana Dashboard Screenshot",
+      "url": "https://attachments.linear.app/553b06a3-b67e-9aa7-9c11-9462b043421c/dashboard.png",
+      "type": "image/png"
+    },
+    {
+      "id": "81474f22",
+      "title": "Sentry Error Export",
+      "url": "https://attachments.linear.app/b77681dd-090e-fe82-44b0-cebf5356e21f/sentry_export.json",
+      "type": "application/json"
+    }
+  ],
+  "url": "https://linear.app/company/issue/ENG-5884"
+}

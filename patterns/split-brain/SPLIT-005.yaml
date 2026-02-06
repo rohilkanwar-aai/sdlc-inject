@@ -1,0 +1,172 @@
+id: SPLIT-005
+version: "1.0"
+name: "Presence updates during partition create ghost users"
+category: "Distributed System Failures"
+subcategory: "Split-Brain & Network Partitions"
+
+sdlc_phases:
+  primary: "Debugging"
+  secondary: ["Maintenance"]
+
+description: |
+  During a network partition, presence information (who is online, cursor
+  positions) becomes stale. When the partition heals, the presence system
+  doesn't properly reconcile, leaving "ghost" users that appear online but
+  are actually disconnected, or real users appearing offline.
+
+target_codebase:
+  name: "zed"
+  min_version: "0.120.0"
+  language: "rust"
+
+injection:
+  files:
+    - path: "crates/collab/src/presence.rs"
+      patches:
+        - type: "replace"
+          old: "fn update_presence(&mut self, user_id: UserId, status: PresenceStatus) {"
+          new: |
+            fn update_presence(&mut self, user_id: UserId, status: PresenceStatus) {
+                // Bug: No timestamp or version on presence updates
+                // Stale updates can overwrite fresh ones
+                self.presence_map.insert(user_id, status);
+                // Missing: version/timestamp comparison
+
+        - type: "replace"
+          old: "fn handle_partition_heal(&mut self) {"
+          new: |
+            fn handle_partition_heal(&mut self) {
+                // Bug: Merges presence maps without reconciliation
+                // Takes union of both sides, keeping ghosts
+                for (user_id, status) in self.remote_presence.drain() {
+                    self.presence_map.entry(user_id).or_insert(status);
+                    // Bug: or_insert keeps stale local entry if exists
+                }
+
+    - path: "crates/collab/src/heartbeat.rs"
+      patches:
+        - type: "replace"
+          old: "fn check_presence_timeout(&mut self) {"
+          new: |
+            fn check_presence_timeout(&mut self) {
+                // Bug: Timeout check doesn't run during partition
+                // because heartbeats aren't received
+                let now = Instant::now();
+                for (user_id, last_seen) in &self.last_heartbeat {
+                    if now.duration_since(*last_seen) > PRESENCE_TIMEOUT {
+                        // This never triggers during partition
+                        // because we stop receiving heartbeats
+                        self.mark_offline(*user_id);
+                    }
+                }
+
+trigger:
+  conditions:
+    - "Network partition lasting > 30 seconds"
+    - "Users joining/leaving during partition"
+    - "Partition heals without full state sync"
+
+  reproduction_steps:
+    - step: 1
+      action: "Users A, B, C all connected"
+    - step: 2
+      action: "Create network partition isolating User C"
+    - step: 3
+      action: "User C closes their editor (during partition)"
+    - step: 4
+      action: "Heal partition"
+    - step: 5
+      action: "User C still appears online to A and B"
+
+observable_symptoms:
+  user_visible:
+    - symptom: "User appears online but doesn't respond"
+    - symptom: "Cursor visible but user has left"
+    - symptom: "User count doesn't match actual connected users"
+    - symptom: "@mentions to ghost users never delivered"
+
+  log_messages:
+    - pattern: "DEBUG.*presence merge.*keeping local"
+      level: "debug"
+    - pattern: "WARN.*heartbeat timeout.*partition active"
+      level: "warn"
+
+  metrics:
+    - name: "presence_ghost_users"
+      type: "gauge"
+      description: "Users in presence map but not in connection map"
+
+difficulty:
+  estimated_human_time_hours: 2.5
+  frontier_model_pass_rate_percent: 35
+
+failure_modes:
+  common:
+    - mode: "Clear all presence on partition heal"
+      description: "Loses legitimate users too"
+    - mode: "Reduce timeout aggressively"
+      description: "Creates flapping for users with slow connections"
+
+golden_path:
+  steps:
+    - step: 1
+      action: "Reproduce with controlled partition"
+    - step: 2
+      action: "Compare presence map vs actual connections"
+    - step: 3
+      action: "Identify missing reconciliation logic"
+    - step: 4
+      action: "Implement versioned presence with proper merge"
+      solutions:
+        preferred: |
+          #[derive(Clone)]
+          struct PresenceEntry {
+              status: PresenceStatus,
+              version: u64,
+              last_updated: Instant,
+          }
+
+          fn update_presence(&mut self, user_id: UserId, entry: PresenceEntry) {
+              self.presence_map
+                  .entry(user_id)
+                  .and_modify(|e| {
+                      if entry.version > e.version {
+                          *e = entry.clone();
+                      }
+                  })
+                  .or_insert(entry);
+          }
+
+          fn handle_partition_heal(&mut self) {
+              // Request full presence from authority
+              let authoritative = self.request_presence_from_leader().await;
+
+              // Replace local with authoritative, keeping only confirmed users
+              self.presence_map = authoritative;
+          }
+
+grading:
+  outcome_based:
+    - criterion: "No ghost users after partition heal"
+      weight: 0.45
+    - criterion: "Real users not incorrectly marked offline"
+      weight: 0.25
+
+  process_based:
+    - criterion: "Identified presence versioning issue"
+      weight: 0.15
+    - criterion: "Understood partition heal reconciliation"
+      weight: 0.15
+
+hints:
+  progressive:
+    - level: 1
+      content: "What happens to presence information when the network is split?"
+    - level: 2
+      content: "When the partition heals, how does the system know which presence data is correct?"
+
+tags:
+  - "split-brain"
+  - "presence"
+  - "ghost-users"
+  - "reconciliation"

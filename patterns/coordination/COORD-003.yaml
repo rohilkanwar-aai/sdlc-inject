@@ -1,0 +1,174 @@
+id: COORD-003
+version: "1.0"
+name: "Operation ordering violation causes state divergence"
+category: "Distributed System Failures"
+subcategory: "Consensus & Coordination Failures"
+
+sdlc_phases:
+  primary: "Debugging"
+  secondary: ["Verification"]
+
+description: |
+  Operations that must be applied in causal order are sometimes applied out
+  of order due to network reordering. The system doesn't properly track causal
+  dependencies, leading to operations being applied before their prerequisites,
+  causing divergent state between replicas.
+
+target_codebase:
+  name: "zed"
+  min_version: "0.120.0"
+  language: "rust"
+
+injection:
+  files:
+    - path: "crates/collab/src/ops.rs"
+      patches:
+        - type: "replace"
+          old: "fn apply_remote_operation(&mut self, op: Operation) -> Result<()> {"
+          new: |
+            fn apply_remote_operation(&mut self, op: Operation) -> Result<()> {
+                // Bug: Applies operation immediately without checking dependencies
+                // If op depends on another op we haven't received yet, state diverges
+
+                // Missing: if !self.dependencies_satisfied(&op) {
+                // Missing:     self.pending_ops.push(op);
+                // Missing:     return Ok(());
+                // Missing: }
+
+                self.apply(op)?;
+
+                // Bug: Doesn't check if pending ops can now be applied
+                Ok(())
+
+        - type: "replace"
+          old: "fn receive_operation(&mut self, op: Operation) {"
+          new: |
+            fn receive_operation(&mut self, op: Operation) {
+                // Bug: No causal delivery - ops applied in arrival order
+                // Network can reorder, causing out-of-order application
+                if let Err(e) = self.apply_remote_operation(op) {
+                    tracing::warn!("Failed to apply operation: {}", e);
+                    // Bug: Silently drops failed operation
+                }
+
+  obfuscation:
+    strategy: "simplification"
+    techniques:
+      - type: "comment_misdirection"
+        content: "// TCP guarantees ordering, so we can apply immediately"
+        location: "near_injection"
+
+trigger:
+  conditions:
+    - "Operations sent over unreliable/reordering network"
+    - "Operation B depends on operation A"
+    - "B arrives before A due to network"
+
+  reproduction_steps:
+    - step: 1
+      action: "User creates file F (operation A)"
+    - step: 2
+      action: "User edits file F (operation B, depends on A)"
+    - step: 3
+      action: "Due to network, B arrives at replica before A"
+    - step: 4
+      action: "Replica fails to apply B (file doesn't exist)"
+
+observable_symptoms:
+  user_visible:
+    - symptom: "Operations silently fail"
+    - symptom: "Document state differs between users"
+    - symptom: "Some edits don't appear on other clients"
+
+  log_messages:
+    - pattern: "WARN.*failed to apply operation.*not found"
+      level: "warn"
+    - pattern: "ERROR.*dependency not satisfied"
+      level: "error"
+
+  metrics:
+    - name: "operations_dropped_total"
+      type: "counter"
+    - name: "out_of_order_operations"
+      type: "counter"
+
+difficulty:
+  estimated_human_time_hours: 3
+  frontier_model_pass_rate_percent: 30
+
+golden_path:
+  steps:
+    - step: 1
+      action: "Reproduce with artificial network delay/reordering"
+    - step: 2
+      action: "Add logging to track operation arrival vs dependencies"
+    - step: 3
+      action: "Identify missing causal delivery mechanism"
+    - step: 4
+      action: "Implement dependency tracking and buffering"
+      solutions:
+        preferred: |
+          struct OperationManager {
+              applied: HashSet<OperationId>,
+              pending: HashMap<OperationId, Operation>,
+          }
+
+          fn receive_operation(&mut self, op: Operation) {
+              if self.dependencies_satisfied(&op) {
+                  self.apply_and_flush(op);
+              } else {
+                  self.pending.insert(op.id, op);
+              }
+          }
+
+          fn dependencies_satisfied(&self, op: &Operation) -> bool {
+              op.dependencies.iter().all(|dep| self.applied.contains(dep))
+          }
+
+          fn apply_and_flush(&mut self, op: Operation) {
+              self.apply(op.clone());
+              self.applied.insert(op.id);
+
+              // Check if any pending ops can now be applied
+              loop {
+                  let ready: Vec<_> = self.pending.values()
+                      .filter(|p| self.dependencies_satisfied(p))
+                      .map(|p| p.id)
+                      .collect();
+
+                  if ready.is_empty() { break; }
+
+                  for id in ready {
+                      if let Some(pending_op) = self.pending.remove(&id) {
+                          self.apply(pending_op.clone());
+                          self.applied.insert(pending_op.id);
+                      }
+                  }
+              }
+          }
+
+grading:
+  outcome_based:
+    - criterion: "Operations applied in causal order"
+      weight: 0.40
+    - criterion: "No operations silently dropped"
+      weight: 0.30
+
+  process_based:
+    - criterion: "Identified missing dependency tracking"
+      weight: 0.15
+    - criterion: "Implemented buffering for out-of-order ops"
+      weight: 0.15
+
+hints:
+  progressive:
+    - level: 1
+      content: "What if operation B depends on operation A, but B arrives first?"
+    - level: 2
+      content: "TCP ordering only applies within a single connection. Different messages may take different paths."
+
+tags:
+  - "coordination"
+  - "causal-ordering"
+  - "dependency"
+  - "state-divergence"

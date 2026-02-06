@@ -1,0 +1,131 @@
+id: RACE-004
+version: "1.0"
+name: "LSP response ordering violation"
+category: "Distributed System Failures"
+subcategory: "Race Conditions"
+
+sdlc_phases:
+  primary: "Debugging"
+  secondary: ["Verification"]
+
+description: |
+  LSP responses can arrive out of order due to varying processing times.
+  The client assumes responses arrive in request order and applies them
+  incorrectly, causing completions or diagnostics to appear for wrong
+  cursor positions or stale document versions.
+
+target_codebase:
+  name: "zed"
+  min_version: "0.120.0"
+  language: "rust"
+
+injection:
+  files:
+    - path: "crates/lsp/src/client.rs"
+      patches:
+        - type: "replace"
+          old: "async fn handle_response(&mut self, response: Response) {"
+          new: |
+            async fn handle_response(&mut self, response: Response) {
+                // Bug: Assumes responses arrive in order
+                // Does not validate response matches current document state
+                let request_id = response.id;
+
+                // Apply response without checking document version
+                if let Some(handler) = self.pending_requests.remove(&request_id) {
+                    // Missing: version check
+                    handler.complete(response.result);
+                }
+
+    - path: "crates/editor/src/completions.rs"
+      patches:
+        - type: "replace"
+          old: "fn apply_completions(&mut self, completions: Vec<Completion>) {"
+          new: |
+            fn apply_completions(&mut self, completions: Vec<Completion>) {
+                // Bug: Applies completions without verifying cursor position
+                // If cursor moved since request, completions are wrong
+                self.completion_menu = Some(CompletionMenu {
+                    items: completions,
+                    // Missing: position: self.request_position,
+                });
+
+  obfuscation:
+    strategy: "simplification"
+
+trigger:
+  conditions:
+    - "Fast typing while LSP is processing"
+    - "LSP server has variable response latency"
+    - "User moves cursor before response arrives"
+
+  reproduction_steps:
+    - step: 1
+      action: "Type quickly to trigger completion"
+    - step: 2
+      action: "Move cursor before completions appear"
+    - step: 3
+      action: "Observe completions at wrong position"
+
+observable_symptoms:
+  user_visible:
+    - symptom: "Completions appear at wrong cursor position"
+    - symptom: "Diagnostics highlight wrong line"
+    - symptom: "Go-to-definition jumps to wrong location"
+
+  log_messages:
+    - pattern: "DEBUG.*response for document version \\d+ but current is \\d+"
+      level: "debug"
+
+difficulty:
+  estimated_human_time_hours: 3
+  frontier_model_pass_rate_percent: 30
+
+golden_path:
+  steps:
+    - step: 1
+      action: "Reproduce with fast typing"
+    - step: 2
+      action: "Add request/response logging with timestamps"
+    - step: 3
+      action: "Identify out-of-order or stale responses"
+    - step: 4
+      action: "Add document version validation"
+      solutions:
+        preferred: |
+          async fn handle_response(&mut self, response: Response) {
+              let request_id = response.id;
+              if let Some(handler) = self.pending_requests.remove(&request_id) {
+                  // Validate document version
+                  if handler.document_version != self.current_document_version {
+                      log::debug!("Discarding stale response");
+                      return;
+                  }
+                  handler.complete(response.result);
+              }
+          }
+
+grading:
+  outcome_based:
+    - criterion: "Stale responses discarded"
+      weight: 0.50
+    - criterion: "Completions appear at correct position"
+      weight: 0.30
+
+  process_based:
+    - criterion: "Identified version mismatch issue"
+      weight: 0.20
+
+hints:
+  progressive:
+    - level: 1
+      content: "What happens if the document changes while waiting for LSP response?"
+    - level: 2
+      content: "Each LSP request should be tagged with the document version."
+
+tags:
+  - "race-condition"
+  - "LSP"
+  - "async"
+  - "ordering"
+  - "stale-response"

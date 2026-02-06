@@ -1,0 +1,238 @@
+id: COORD-002
+version: "1.0"
+name: "CRDT merge conflict not properly resolved"
+category: "Distributed System Failures"
+subcategory: "Consensus & Coordination Failures"
+
+sdlc_phases:
+  primary: "Debugging"
+  secondary: ["Maintenance", "Verification"]
+
+description: |
+  The CRDT (Conflict-free Replicated Data Type) implementation has a bug in
+  its merge function that causes data to be lost when concurrent operations
+  are merged. Specifically, when two users make conflicting edits, the merge
+  incorrectly discards one edit instead of interleaving them properly.
+
+target_codebase:
+  name: "zed"
+  min_version: "0.120.0"
+  language: "rust"
+
+injection:
+  files:
+    - path: "crates/text/src/crdt.rs"
+      patches:
+        - type: "replace"
+          old: "fn merge(&mut self, remote: &Self) -> MergeResult {"
+          new: |
+            fn merge(&mut self, remote: &Self) -> MergeResult {
+                // Bug: When operations have same Lamport timestamp,
+                // uses arbitrary tiebreaker that may drop operations
+                for op in &remote.operations {
+                    if let Some(local_op) = self.operations.iter().find(|o| o.id == op.id) {
+                        // Duplicate, skip
+                        continue;
+                    }
+
+                    // Bug: Finds insertion point incorrectly for concurrent ops
+                    let insert_pos = self.operations.iter()
+                        .position(|o| o.timestamp > op.timestamp)
+                        .unwrap_or(self.operations.len());
+
+                    // Bug: If timestamps equal, should use replica ID as tiebreaker
+                    // but we just append, potentially violating causal order
+                    self.operations.insert(insert_pos, op.clone());
+                }
+
+                self.rebuild_document()  // Lost operations won't appear
+
+        - type: "replace"
+          old: "fn apply_operation(&mut self, op: &Operation) -> Result<()> {"
+          new: |
+            fn apply_operation(&mut self, op: &Operation) -> Result<()> {
+                match op.kind {
+                    OpKind::Insert { pos, ref text } => {
+                        // Bug: Position doesn't account for concurrent deletes
+                        // If another user deleted before this position,
+                        // the insert goes in the wrong place
+                        if pos <= self.content.len() {
+                            self.content.insert_str(pos, text);
+                        }
+                        // Silent drop if pos > len (should never happen but does)
+                    }
+                    OpKind::Delete { pos, len } => {
+                        // Bug: Doesn't check if range was already deleted
+                        if pos + len <= self.content.len() {
+                            self.content.drain(pos..pos+len);
+                        }
+                    }
+                }
+                Ok(())
+
+trigger:
+  conditions:
+    - "Two users editing simultaneously"
+    - "Operations have overlapping positions"
+    - "Network delay causes merge to happen out of order"
+
+  reproduction_steps:
+    - step: 1
+      action: "User A and B both position cursor at same location"
+    - step: 2
+      action: "User A types 'hello' while User B types 'world' simultaneously"
+    - step: 3
+      action: "After sync, one user's text is missing"
+
+observable_symptoms:
+  user_visible:
+    - symptom: "Text disappears after collaborative editing"
+    - symptom: "Document content differs between users"
+    - symptom: "Undo behaves incorrectly after merge"
+
+  log_messages:
+    - pattern: "DEBUG.*merge.*\\d+ operations from remote"
+      level: "debug"
+    - pattern: "WARN.*position out of bounds.*applying insert"
+      level: "warn"
+
+  metrics:
+    - name: "crdt_merge_conflicts"
+      type: "counter"
+    - name: "crdt_lost_operations"
+      type: "counter"
+      description: "Operations that couldn't be applied"
+
+difficulty:
+  estimated_human_time_hours: 4
+  frontier_model_pass_rate_percent: 20
+  complexity_factors:
+    - "CRDT theory is complex"
+    - "Concurrent editing hard to reproduce"
+    - "Bug manifests inconsistently"
+
+failure_modes:
+  common:
+    - mode: "Blame network timing"
+      description: "Assumes problem is message ordering"
+    - mode: "Add mutex for edits"
+      description: "Defeats purpose of CRDT"
+  subtle:
+    - mode: "Fix insert position but not delete"
+      description: "Both need proper transformation"
+
+golden_path:
+  overview: "Understand CRDT invariants and fix merge/apply functions"
+  steps:
+    - step: 1
+      action: "Reproduce with concurrent edits"
+      details: "Write test that simulates concurrent operations"
+      test_code: |
+        #[test]
+        fn test_concurrent_insert() {
+            let mut doc_a = CrdtDocument::new("a");
+            let mut doc_b = CrdtDocument::new("b");
+
+            doc_a.insert(0, "hello");
+            doc_b.insert(0, "world");
+
+            doc_a.merge(&doc_b);
+            doc_b.merge(&doc_a);
+
+            assert_eq!(doc_a.content(), doc_b.content());
+            assert!(doc_a.content().contains("hello"));
+            assert!(doc_a.content().contains("world"));
+        }
+
+    - step: 2
+      action: "Trace merge function with logging"
+      key_insight: "Operations with same timestamp need deterministic tiebreaker"
+
+    - step: 3
+      action: "Understand operational transformation"
+      resources:
+        - "https://en.wikipedia.org/wiki/Operational_transformation"
+        - "CRDT papers by Shapiro et al"
+
+    - step: 4
+      action: "Implement proper merge with tiebreaking"
+      solutions:
+        preferred: |
+          fn merge(&mut self, remote: &Self) -> MergeResult {
+              for op in &remote.operations {
+                  if self.has_operation(&op.id) {
+                      continue;
+                  }
+
+                  // Proper tiebreaker: timestamp, then replica ID
+                  let insert_pos = self.operations.iter()
+                      .position(|o| {
+                          (o.timestamp, o.replica_id) > (op.timestamp, op.replica_id)
+                      })
+                      .unwrap_or(self.operations.len());
+
+                  self.operations.insert(insert_pos, op.clone());
+              }
+
+              // Transform positions based on causal ordering
+              let transformed = self.transform_operations();
+              self.apply_transformed(transformed)
+          }
+
+          fn transform_insert_pos(&self, op: &Operation, pos: usize) -> usize {
+              let mut adjusted_pos = pos;
+              for prior_op in self.operations.iter().filter(|o| o.causally_before(op)) {
+                  match prior_op.kind {
+                      OpKind::Insert { pos: p, ref text } if p <= adjusted_pos => {
+                          adjusted_pos += text.len();
+                      }
+                      OpKind::Delete { pos: p, len } if p < adjusted_pos => {
+                          adjusted_pos = adjusted_pos.saturating_sub(len.min(adjusted_pos - p));
+                      }
+                      _ => {}
+                  }
+              }
+              adjusted_pos
+          }
+
+grading:
+  outcome_based:
+    - criterion: "No data loss during concurrent edits"
+      weight: 0.40
+      verification:
+        type: "property_test"
+        iterations: 1000
+
+    - criterion: "Documents converge to same state"
+      weight: 0.30
+      verification:
+        type: "automated"
+        script: |
+          for _ in 0..100 {
+              let (doc_a, doc_b) = create_diverged_documents();
+              doc_a.merge(&doc_b);
+              doc_b.merge(&doc_a);
+              assert_eq!(doc_a.content(), doc_b.content());
+          }
+
+  process_based:
+    - criterion: "Understood CRDT merge semantics"
+      weight: 0.15
+    - criterion: "Wrote concurrent edit test"
+      weight: 0.15
+
+hints:
+  progressive:
+    - level: 1
+      content: "How does the system decide which operation 'wins' when two users edit at the same position?"
+    - level: 2
+      content: "When timestamps are equal, there needs to be a deterministic tiebreaker."
+    - level: 3
+      content: "The insert position must be transformed based on prior operations."
+
+tags:
+  - "coordination"
+  - "crdt"
+  - "merge-conflict"
+  - "data-loss"
+  - "collaborative-editing"

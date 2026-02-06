@@ -1,0 +1,235 @@
+id: COORD-005
+version: "1.0"
+name: "Tombstone accumulation causes memory exhaustion"
+category: "Distributed System Failures"
+subcategory: "Consensus & Coordination Failures"
+
+sdlc_phases:
+  primary: "Maintenance"
+  secondary: ["Debugging"]
+
+description: |
+  In CRDT-based systems, deleted elements are kept as "tombstones" to ensure
+  convergence across replicas. The system never garbage collects these
+  tombstones, causing unbounded memory growth over time, especially in
+  documents with heavy editing (many delete operations).
+
+target_codebase:
+  name: "zed"
+  min_version: "0.120.0"
+  language: "rust"
+
+injection:
+  files:
+    - path: "crates/text/src/tombstones.rs"
+      patches:
+        - type: "replace"
+          old: "fn delete(&mut self, range: Range<usize>) {"
+          new: |
+            fn delete(&mut self, range: Range<usize>) {
+                // Create tombstones for deleted characters
+                for pos in range {
+                    let char_id = self.get_char_id(pos);
+                    self.tombstones.insert(char_id, Tombstone {
+                        char_id,
+                        deleted_at: Instant::now(),
+                        deleted_by: self.replica_id,
+                    });
+                    // Bug: Tombstone is never removed
+                }
+
+                // Remove from visible content
+                self.content.drain(range);
+
+        - type: "insert"
+          location: "end_of_impl"
+          content: |
+            // Bug: No garbage collection method implemented
+            // fn gc_tombstones(&mut self) { ... } is missing
+            //
+            // Comment suggests GC exists but it doesn't:
+            // "Tombstones are garbage collected when all replicas have seen the delete"
+
+    - path: "crates/text/src/document.rs"
+      patches:
+        - type: "replace"
+          old: "fn memory_usage(&self) -> MemoryStats {"
+          new: |
+            fn memory_usage(&self) -> MemoryStats {
+                MemoryStats {
+                    content_bytes: self.content.len(),
+                    // Bug: Tombstones not included in memory accounting
+                    // tombstone_bytes: self.tombstones.len() * size_of::<Tombstone>(),
+                    total_bytes: self.content.len(),  // Under-reports actual usage
+                }
+
+trigger:
+  conditions:
+    - "Long editing session with many deletes"
+    - "Find-and-replace operations"
+    - "Large document refactoring"
+
+  reproduction_steps:
+    - step: 1
+      action: "Open large document"
+    - step: 2
+      action: "Repeatedly select-all and delete, then undo"
+    - step: 3
+      action: "Monitor memory usage"
+    - step: 4
+      action: "Memory grows without bound"
+
+  expected_frequency: "Always in long sessions"
+
+observable_symptoms:
+  user_visible:
+    - symptom: "Editor becomes slow over time"
+    - symptom: "Memory usage grows continuously"
+    - symptom: "System eventually runs out of memory"
+
+  log_messages:
+    - pattern: "DEBUG.*tombstone count.*\\d+"
+      level: "debug"
+    - pattern: "WARN.*memory pressure"
+      level: "warn"
+
+  metrics:
+    - name: "document_tombstone_count"
+      type: "gauge"
+      anomaly: "Monotonically increasing"
+    - name: "process_memory_bytes"
+      type: "gauge"
+      anomaly: "Steady growth over time"
+
+difficulty:
+  estimated_human_time_hours: 3
+  frontier_model_pass_rate_percent: 30
+  complexity_factors:
+    - "Tombstone GC requires distributed coordination"
+    - "Premature GC causes data loss"
+    - "Need to track which replicas have seen delete"
+
+failure_modes:
+  common:
+    - mode: "Delete tombstones after fixed time"
+      description: "May cause divergence if replica was offline"
+    - mode: "Limit tombstone count"
+      description: "Old tombstones dropped may cause issues"
+  subtle:
+    - mode: "GC based on local view only"
+      description: "Other replicas may not have seen delete yet"
+
+golden_path:
+  overview: "Implement safe tombstone garbage collection with distributed acknowledgment"
+  steps:
+    - step: 1
+      action: "Identify tombstone accumulation"
+      tools: ["memory profiler", "heap dump analysis"]
+      commands:
+        - "cargo run --features profiling -- --heap-dump"
+
+    - step: 2
+      action: "Find missing GC implementation"
+      search_queries:
+        - "tombstone"
+        - "garbage_collect"
+        - "gc_"
+
+    - step: 3
+      action: "Understand CRDT tombstone requirements"
+      key_insight: "Can only GC tombstone when ALL replicas have seen the delete"
+
+    - step: 4
+      action: "Implement distributed tombstone GC"
+      solutions:
+        preferred: |
+          struct TombstoneManager {
+              tombstones: HashMap<CharId, Tombstone>,
+              // Track which replicas have acknowledged each tombstone
+              acked_by: HashMap<CharId, HashSet<ReplicaId>>,
+              known_replicas: HashSet<ReplicaId>,
+          }
+
+          impl TombstoneManager {
+              fn acknowledge(&mut self, char_id: CharId, replica_id: ReplicaId) {
+                  self.acked_by.entry(char_id).or_default().insert(replica_id);
+                  self.maybe_gc(char_id);
+              }
+
+              fn maybe_gc(&mut self, char_id: CharId) {
+                  if let Some(acked) = self.acked_by.get(&char_id) {
+                      // All known replicas have seen this delete
+                      if acked.is_superset(&self.known_replicas) {
+                          self.tombstones.remove(&char_id);
+                          self.acked_by.remove(&char_id);
+                      }
+                  }
+              }
+
+              fn gc_all_possible(&mut self) {
+                  let candidates: Vec<_> = self.tombstones.keys().copied().collect();
+                  for char_id in candidates {
+                      self.maybe_gc(char_id);
+                  }
+              }
+          }
+
+        alternative: |
+          // Simpler: Epoch-based GC
+          // All replicas agree to "epoch boundaries" where
+          // tombstones before the epoch can be safely removed
+          fn gc_before_epoch(&mut self, epoch: u64) {
+              self.tombstones.retain(|_, t| t.epoch >= epoch);
+          }
+
+    - step: 5
+      action: "Add memory accounting for tombstones"
+      verification: "Memory stats include tombstone overhead"
+
+grading:
+  outcome_based:
+    - criterion: "Memory bounded during long sessions"
+      weight: 0.35
+      verification:
+        type: "stress_test"
+        command: "cargo test --release stress_edit_delete"
+        timeout_seconds: 300
+
+    - criterion: "No data loss from premature GC"
+      weight: 0.30
+      verification:
+        type: "convergence_test"
+        description: "Documents converge after GC"
+
+  process_based:
+    - criterion: "Identified tombstone accumulation"
+      weight: 0.15
+    - criterion: "Understood distributed GC requirements"
+      weight: 0.20
+
+hints:
+  progressive:
+    - level: 1
+      content: "Where do deleted characters go? Are they ever cleaned up?"
+
+    - level: 2
+      content: "Look at the tombstones data structure. Does it ever shrink?"
+
+    - level: 3
+      content: "Tombstones can only be removed when all replicas have seen the delete."
+
+environment:
+  monitoring:
+    prometheus_metrics:
+      - "document_tombstone_count"
+      - "document_gc_runs_total"
+      - "document_gc_reclaimed_bytes"
+    grafana_dashboards:
+      - "crdt-memory-health.json"
+
+tags:
+  - "coordination"
+  - "crdt"
+  - "tombstone"
+  - "memory-leak"
+  - "garbage-collection"

@@ -1,0 +1,47 @@
+[
+  {
+    "id": "dc968910",
+    "body": "Acknowledged. Starting investigation.",
+    "user": {
+      "id": "5104311e",
+      "name": "On-Call Engineer"
+    },
+    "createdAt": "2026-02-05T18:18:25.395862Z"
+  },
+  {
+    "id": "73d16238",
+    "body": "## Investigation Update\n\n### Metrics Analysis\n- Error rate elevated on buffer acquisition endpoint\n- Connection pool utilization at 100%\n- Latency p99 increased 40x\n\n### Log Analysis\nFound correlated errors:\n```\nWARN.*buffer ownership conflict detected\n```\n\n### Hypothesis\nPossible resource contention under high concurrency.\n",
+    "user": {
+      "id": "a9feae5a",
+      "name": "On-Call Engineer"
+    },
+    "createdAt": "2026-02-05T18:37:25.395862Z"
+  },
+  {
+    "id": "0a5f39c1",
+    "body": "This looks like a race condition we've seen before.\n\nCheck `crates/collab/src/db/buffers.rs` - specifically the lock acquisition logic.\n\nLook for:\n1. Separate check and acquire operations\n2. Missing transaction boundaries\n3. Non-atomic updates\n",
+    "user": {
+      "id": "c21fe091",
+      "name": "Senior Engineer"
+    },
+    "createdAt": "2026-02-05T19:11:25.395862Z"
+  },
+  {
+    "id": "0e91adc0",
+    "body": "## Root Cause Identified\n\nFound a TOCTOU (Time-of-check to time-of-use) race condition.\n\n### The Bug\n```\n1. Check if resource available (Query 1)\n2. If available, acquire lock (Query 2)\n```\n\nBetween steps 1 and 2, another request can acquire the lock.\n\n### The Fix\nMake check-and-acquire atomic using `SELECT ... FOR UPDATE` or single `UPDATE ... WHERE ... RETURNING`.\n\nPR in progress.\n",
+    "user": {
+      "id": "ca3be87d",
+      "name": "On-Call Engineer"
+    },
+    "createdAt": "2026-02-05T19:41:25.395862Z"
+  },
+  {
+    "id": "6c1e27b7",
+    "body": "## Fix Update\n\nPR opened: #2688\n\nChanges:\n- Replaced check-then-acquire with atomic operation\n- Added concurrent test\n- Updated metrics for better observability\n\nCurrently in review. Will deploy once approved.\n",
+    "user": {
+      "id": "11b491d4",
+      "name": "On-Call Engineer"
+    },
+    "createdAt": "2026-02-05T19:58:25.395862Z"
+  }
+]

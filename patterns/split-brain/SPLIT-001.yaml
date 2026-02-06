@@ -1,0 +1,305 @@
+id: SPLIT-001
+version: "1.0"
+name: "Collab server partition causes dual edit authority"
+category: "Distributed System Failures"
+subcategory: "Split-Brain & Network Partitions"
+
+sdlc_phases:
+  primary: "Debugging"
+  secondary: ["Maintenance", "Verification"]
+
+description: |
+  During a network partition between collab server replicas, both partitions
+  believe they are the primary authority for document edits. This causes
+  divergent document states that cannot be automatically reconciled when
+  the partition heals, leading to data loss or corruption.
+
+target_codebase:
+  name: "zed"
+  min_version: "0.120.0"
+  language: "rust"
+
+injection:
+  files:
+    - path: "crates/collab/src/consensus.rs"
+      patches:
+        - type: "replace"
+          old: "fn check_quorum(&self) -> bool {"
+          new: |
+            fn check_quorum(&self) -> bool {
+                // Bug: Uses stale peer count, doesn't verify actual connectivity
+                let peer_count = self.cached_peer_count; // May be outdated
+        - type: "insert_after"
+          anchor: "fn handle_leader_election"
+          content: |
+            // Missing: Fencing token validation
+            // Both partitions can believe they are leader
+
+    - path: "crates/collab/src/replication.rs"
+      patches:
+        - type: "replace"
+          old: "async fn replicate_edit(&self, edit: Edit) -> Result<()> {"
+          new: |
+            async fn replicate_edit(&self, edit: Edit) -> Result<()> {
+                // Bug: Accepts edits without verifying we're still leader
+                // Should check fencing token before applying
+                if self.is_leader {
+                    // Stale check - could have lost leadership
+
+  config_changes:
+    - file: "crates/collab/src/config.rs"
+      changes:
+        - key: "LEADER_LEASE_TIMEOUT_MS"
+          old_value: "10000"
+          new_value: "60000"
+          comment: "Extended to reduce election churn"
+        - key: "HEARTBEAT_INTERVAL_MS"
+          old_value: "1000"
+          new_value: "5000"
+          comment: "Reduced frequency for efficiency"
+
+  obfuscation:
+    strategy: "configuration_tuning"
+    techniques:
+      - type: "add_misleading_comment"
+        content: "// Optimized timeouts based on production latency analysis"
+
+trigger:
+  conditions:
+    - "Network partition isolates server replicas"
+    - "Partition duration > heartbeat interval but < lease timeout"
+    - "Active editing on both sides of partition"
+
+  reproduction_steps:
+    - step: 1
+      action: "Deploy collab with 3 replicas"
+    - step: 2
+      action: "Start editing session with users connected to different replicas"
+    - step: 3
+      action: "Introduce network partition (iptables rules)"
+      command: |
+        # On replica-2, block traffic to replica-1
+        iptables -A INPUT -s replica-1 -j DROP
+        iptables -A OUTPUT -d replica-1 -j DROP
+    - step: 4
+      action: "Continue editing on both sides of partition"
+    - step: 5
+      action: "Heal partition and observe divergence"
+
+observable_symptoms:
+  user_visible:
+    - symptom: "Edits from one user overwrite another's after reconnection"
+    - symptom: "Document shows 'conflicting changes' error"
+    - symptom: "Undo history corrupted or missing entries"
+    - symptom: "Users see different document content"
+
+  log_messages:
+    - pattern: "WARN.*split-brain detected.*multiple leaders"
+      level: "warning"
+    - pattern: "ERROR.*document state divergence.*cannot reconcile"
+      level: "error"
+    - pattern: "INFO.*leader election.*new leader"
+      level: "info"
+
+  metrics:
+    - name: "leader_elections_total"
+      anomaly: "Sudden spike during partition"
+    - name: "edit_conflicts_total"
+      anomaly: "Spike after partition heals"
+    - name: "document_divergence_detected"
+      type: "counter"
+
+  database_state:
+    - query: |
+        SELECT document_id, COUNT(DISTINCT content_hash) as versions
+        FROM document_snapshots
+        WHERE timestamp > NOW() - INTERVAL '1 hour'
+        GROUP BY document_id
+        HAVING COUNT(DISTINCT content_hash) > 1
+      indicates_bug: "> 0 rows"
+
+difficulty:
+  estimated_human_time_hours: 6
+  frontier_model_pass_rate_percent: 10
+  complexity_factors:
+    - "Requires understanding of distributed consensus"
+    - "Bug only manifests during network partition"
+    - "Symptoms appear after partition heals"
+    - "Multiple interacting configuration issues"
+
+failure_modes:
+  common:
+    - mode: "Increase timeouts"
+      description: "Makes lease longer, delays but doesn't prevent split-brain"
+    - mode: "Add more replicas"
+      description: "Doesn't address fundamental quorum bug"
+    - mode: "Blame network"
+      description: "Focuses on network stability rather than consensus safety"
+
+  subtle:
+    - mode: "Fix quorum but not fencing"
+      description: "Fixes peer count but misses fencing token validation"
+    - mode: "Add leader check after partition"
+      description: "Checks leadership but accepts stale edits during partition"
+
+golden_path:
+  steps:
+    - step: 1
+      action: "Understand the architecture"
+      details: "Map out how leader election and replication work"
+
+    - step: 2
+      action: "Simulate network partition"
+      tools: ["iptables", "tc", "toxiproxy"]
+
+    - step: 3
+      action: "Observe both partitions accepting edits"
+      key_insight: "Both sides believe they are leader"
+
+    - step: 4
+      action: "Trace quorum checking code"
+      search_queries:
+        - "check_quorum"
+        - "is_leader"
+        - "leader_election"
+
+    - step: 5
+      action: "Identify stale peer count usage"
+      key_insight: "cached_peer_count doesn't reflect current connectivity"
+
+    - step: 6
+      action: "Identify missing fencing token"
+      key_insight: "Edits accepted without verifying current leadership"
+
+    - step: 7
+      action: "Implement proper quorum and fencing"
+      solutions:
+        quorum_fix: |
+          fn check_quorum(&self) -> bool {
+              // Actually ping peers to verify connectivity
+              let live_peers = self.ping_all_peers().await
+                  .filter(|r| r.is_ok())
+                  .count();
+              live_peers >= (self.total_peers / 2) + 1
+          }
+        fencing_fix: |
+          async fn replicate_edit(&self, edit: Edit) -> Result<()> {
+              // Verify fencing token before accepting edit
+              let current_token = self.get_current_fencing_token().await?;
+              if edit.fencing_token < current_token {
+                  return Err(Error::StaleFencingToken);
+              }
+              // Only now apply the edit
+              self.apply_edit(edit).await
+          }
+
+    - step: 8
+      action: "Add partition tolerance tests"
+      test_outline: |
+        #[tokio::test]
+        async fn test_partition_prevents_dual_leader() {
+            let cluster = setup_3_node_cluster().await;
+            let partition = cluster.partition_node(1).await;
+
+            // Both partitions try to accept edits
+            let edit_a = cluster.node(0).submit_edit(edit1).await;
+            let edit_b = cluster.node(1).submit_edit(edit2).await;
+
+            // Only one should succeed
+            assert!(edit_a.is_ok() ^ edit_b.is_ok());
+
+            partition.heal().await;
+            // Document should be consistent
+            assert_eq!(cluster.node(0).get_doc(), cluster.node(1).get_doc());
+        }
+
+grading:
+  outcome_based:
+    - criterion: "No dual-leader during partition"
+      weight: 0.30
+      verification:
+        type: "partition_test"
+        description: "Only one partition accepts edits"
+
+    - criterion: "Documents consistent after partition heals"
+      weight: 0.30
+      verification:
+        type: "consistency_check"
+
+    - criterion: "Fencing tokens enforced"
+      weight: 0.15
+
+  process_based:
+    - criterion: "Simulated network partition"
+      weight: 0.10
+    - criterion: "Identified both quorum and fencing issues"
+      weight: 0.15
+
+hints:
+  progressive:
+    - level: 1
+      content: "The bug manifests when network connectivity is unstable."
+    - level: 2
+      content: "Look at how the system determines who is the leader."
+    - level: 3
+      content: "There are two issues: how quorum is checked, and how edits are validated."
+    - level: 4
+      content: "The quorum check uses stale data, and there's no fencing token to prevent stale leaders from accepting edits."
+
+environment:
+  docker:
+    compose_file: "docker-compose.split-001.yaml"
+    services:
+      - name: "collab-1"
+        build: { context: ".", dockerfile: "Dockerfile.collab" }
+        environment:
+          NODE_ID: "1"
+          PEERS: "collab-2:8080,collab-3:8080"
+
+      - name: "collab-2"
+        build: { context: ".", dockerfile: "Dockerfile.collab" }
+        environment:
+          NODE_ID: "2"
+          PEERS: "collab-1:8080,collab-3:8080"
+
+      - name: "collab-3"
+        build: { context: ".", dockerfile: "Dockerfile.collab" }
+        environment:
+          NODE_ID: "3"
+          PEERS: "collab-1:8080,collab-2:8080"
+
+      - name: "toxiproxy"
+        image: "ghcr.io/shopify/toxiproxy"
+        ports: ["8474:8474"]
+
+  network_simulation:
+    tool: "toxiproxy"
+    scenarios:
+      - name: "partition_1_from_2_3"
+        toxic:
+          type: "timeout"
+          attributes: { timeout: 0 }
+          upstream: "collab-1"
+
+related_patterns:
+  - id: "COORD-001"
+    relationship: "prerequisite"
+    description: "Distributed lock issues compound with split-brain"
+  - id: "CLOCK-009"
+    relationship: "exacerbates"
+    description: "Clock drift makes lease expiration unpredictable"
+
+related_incidents:
+  - url: "https://github.com/aphyr/partitions-post"
+    title: "Jepsen partition analysis"
+  - url: "https://en.wikipedia.org/wiki/Split-brain_(computing)"
+    title: "Split-brain computing overview"
+
+tags:
+  - "split-brain"
+  - "network-partition"
+  - "consensus"
+  - "distributed-systems"
+  - "leader-election"
+  - "fencing"
+  - "quorum"

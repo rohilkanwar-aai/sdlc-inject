@@ -1,0 +1,187 @@
+{
+  "issue": {
+    "id": 5482368,
+    "number": 9343,
+    "title": "[Bug] Check-then-act buffer ownership race",
+    "body": "## Description\n\nA race condition in buffer ownership checking allows two users to\nsimultaneously claim ownership of the same buffer, leading to\nconflicting edits and potential data loss. The bug occurs because\nthe ownership check and acquisition are not atomic operations.\n\n\n## Steps to Reproduce\n\n1. Start collab server with sdlc_inject feature enabled\n2. User A connects and opens project P\n3. User B joins project P\n4. Simultaneously (within 100ms), both users open file F\n5. Observe: Both users see 'buffer acquired' but subsequent edits conflict\n\n\n## Expected Behavior\n\nOperations should complete successfully without conflicts.\n\n## Actual Behavior\n\n- Edits appear then disappear\n- Cursor jumps unexpectedly to other user's position\n- Undo doesn't restore expected state\n- Content appears duplicated or garbled\n\n\n## Environment\n\n- OS: macOS 14.0\n- App Version: v0.129.2\n- Users affected: ~37\n\n## Additional Context\n\nThis appears to happen more frequently when multiple users are editing the same file.\n\nPossibly related to #418 (similar symptoms).\n",
+    "state": "open",
+    "labels": [
+      {
+        "name": "bug",
+        "color": "d73a4a"
+      },
+      {
+        "name": "priority: high",
+        "color": "ff6b6b"
+      },
+      {
+        "name": "distributed-system-failures",
+        "color": "0366d6"
+      },
+      {
+        "name": "needs-investigation",
+        "color": "fbca04"
+      }
+    ],
+    "user": {
+      "login": "affected-user",
+      "id": 78527,
+      "type": "User"
+    },
+    "assignees": [
+      {
+        "login": "oncall-engineer",
+        "id": 60842
+      }
+    ],
+    "milestone": {
+      "title": "v0.130.0",
+      "number": 28
+    },
+    "created_at": "2026-02-05T17:12:25.398049Z",
+    "updated_at": "2026-02-05T19:55:25.398049Z",
+    "comments": 8,
+    "html_url": "https://github.com/org/zed/issues/3371"
+  },
+  "pull_request": {
+    "id": 9400001,
+    "number": 9396,
+    "title": "fix: resolve race condition in buffer lock acquisition",
+    "body": "## Summary\n\nFixes #3323\n\nThis PR resolves a TOCTOU (Time-of-check to time-of-use) race condition in buffer lock acquisition that was causing conflicts when multiple users tried to open the same file simultaneously.\n\n## Changes\n\n- `crates/collab/src/db/buffers.rs`\n- `crates/collab/src/db/mod.rs`\n\n## Root Cause\n\nThe previous implementation had a race window:\n1. Check if buffer is available (Query 1)\n2. If available, acquire lock (Query 2)\n\nBetween these two operations, another request could acquire the lock.\n\n## Solution\n\nReplace the two-step process with an atomic operation:\n```sql\nUPDATE buffers SET locked_by = $1\nWHERE id = $2 AND locked_by IS NULL\nRETURNING id\n```\n\n## Testing\n\n- [x] Added concurrent acquisition test\n- [x] Existing tests pass\n- [x] Manual testing with 2 clients\n\n## Checklist\n\n- [x] Code follows project conventions\n- [x] Tests added/updated\n- [x] Documentation updated (if needed)\n",
+    "state": "open",
+    "draft": false,
+    "user": {
+      "login": "oncall-engineer"
+    },
+    "head": {
+      "ref": "fix/buffer-lock-race-965"
+    },
+    "base": {
+      "ref": "main"
+    },
+    "labels": [
+      {
+        "name": "bug-fix",
+        "color": "00ff00"
+      },
+      {
+        "name": "distributed-system-failures",
+        "color": "0366d6"
+      }
+    ],
+    "created_at": "2026-02-05T19:39:25.398049Z",
+    "updated_at": "2026-02-05T20:02:25.398049Z",
+    "mergeable": true,
+    "additions": 99,
+    "deletions": 30,
+    "changed_files": 2,
+    "html_url": "https://github.com/org/zed/pull/7149"
+  },
+  "issue_comments": [
+    {
+      "id": 5198755,
+      "body": "Thanks for the report! I've added this to our triage queue.\n\nA few questions:\n1. How frequently does this occur?\n2. Are both users on the same network?\n3. Can you share any logs from when this happens?\n\ncc @oncall-engineer for investigation.",
+      "user": {
+        "login": "maintainer"
+      },
+      "created_at": "2026-02-05T17:17:25.398049Z"
+    },
+    {
+      "id": 2268956,
+      "body": "I can reproduce this consistently when collaborating with another user.",
+      "user": {
+        "login": "affected-user"
+      },
+      "created_at": "2026-02-05T17:26:25.398049Z"
+    },
+    {
+      "id": 1311532,
+      "body": "I'm investigating this now.\n\nInitial findings:\n- Error rate spiked around the time of the report\n- Seeing `WARN.*buffer ownership conflict detected` in logs\n- Appears to correlate with concurrent buffer operations\n\nWill update once I have more info.",
+      "user": {
+        "login": "oncall-engineer"
+      },
+      "created_at": "2026-02-05T17:43:25.398049Z"
+    },
+    {
+      "id": 8439863,
+      "body": "This looks familiar. I think I've seen this before in the lock acquisition code.\n\n@oncall-engineer check `crates/collab/src/db/buffers.rs` - specifically look at how we check availability before acquiring a lock. There might be a race window there.",
+      "user": {
+        "login": "senior-dev"
+      },
+      "created_at": "2026-02-05T18:05:25.398049Z"
+    },
+    {
+      "id": 3952030,
+      "body": "Found it! This is a classic TOCTOU (Time-of-check to time-of-use) bug.\n\n**The Problem:**\n```\n1. Check if buffer available (separate query)\n2. If yes, acquire lock (another query)\n```\n\nBetween steps 1 and 2, another request can swoop in and grab the lock.\n\n**The Fix:**\nMake the check-and-acquire atomic using a single `UPDATE ... WHERE ... RETURNING` query.\n\nPR incoming.",
+      "user": {
+        "login": "oncall-engineer"
+      },
+      "created_at": "2026-02-05T19:06:25.398049Z"
+    },
+    {
+      "id": 2420207,
+      "body": "Fix PR opened: #4528\n\nThe fix makes lock acquisition atomic and adds concurrent tests to prevent regression.\n\nWill close this issue once the PR is merged.",
+      "user": {
+        "login": "oncall-engineer"
+      },
+      "created_at": "2026-02-05T19:43:25.398049Z"
+    }
+  ],
+  "pr_comments": [
+    {
+      "id": 2288562,
+      "body": "LGTM! The atomic approach is the right fix. One small suggestion:",
+      "user": {
+        "login": "senior-dev"
+      },
+      "created_at": "2026-02-05T19:43:25.398049Z",
+      "pull_request_review_id": 6472908
+    },
+    {
+      "id": 9990315,
+      "body": "Good point, updated.",
+      "user": {
+        "login": "oncall-engineer"
+      },
+      "created_at": "2026-02-05T19:54:25.398049Z",
+      "pull_request_review_id": null
+    },
+    {
+      "id": 5716966,
+      "body": "Approved. Let's get this merged and deployed.",
+      "user": {
+        "login": "maintainer"
+      },
+      "created_at": "2026-02-05T19:59:25.398049Z",
+      "pull_request_review_id": 1790115
+    }
+  ],
+  "commit": {
+    "sha": "c1ffec72382134d553ae5d2afcc9a853",
+    "message": "fix: make buffer lock acquisition atomic\n\nResolves race condition where concurrent requests could both pass\nthe availability check before either acquired the lock.\n\nReplaces check-then-acquire pattern with atomic UPDATE...RETURNING.\n\nCloses #5377\n",
+    "author": {
+      "name": "On-Call Engineer",
+      "email": "oncall@company.com",
+      "date": "2026-02-05T19:46:25.398049Z"
+    },
+    "committer": {
+      "name": "On-Call Engineer",
+      "email": "oncall@company.com",
+      "date": "2026-02-05T19:45:25.398049Z"
+    },
+    "files": [
+      {
+        "filename": "crates/collab/src/db/buffers.rs",
+        "status": "modified",
+        "additions": 30,
+        "deletions": 8
+      },
+      {
+        "filename": "crates/collab/src/db/mod.rs",
+        "status": "modified",
+        "additions": 15,
+        "deletions": 15
+      }
+    ]
+  }
+}

@@ -1,0 +1,165 @@
+id: RACE-003
+version: "1.0"
+name: "File watcher event deduplication race"
+category: "Distributed System Failures"
+subcategory: "Race Conditions"
+
+sdlc_phases:
+  primary: "Debugging"
+  secondary: ["Maintenance"]
+
+description: |
+  The file system watcher deduplicates events using a time-based window,
+  but the deduplication check races with event processing. This causes
+  some file changes to be missed or processed twice, leading to stale
+  editor state or duplicate operations.
+
+target_codebase:
+  name: "zed"
+  min_version: "0.120.0"
+  language: "rust"
+
+injection:
+  files:
+    - path: "crates/fs/src/watcher.rs"
+      patches:
+        - type: "replace"
+          old: "fn should_process_event(&self, event: &FsEvent) -> bool {"
+          new: |
+            fn should_process_event(&self, event: &FsEvent) -> bool {
+                let now = Instant::now();
+                let key = event.path.clone();
+
+                // Check if we've seen this event recently (non-atomic read)
+                if let Some(last_seen) = self.recent_events.get(&key) {
+                    if now.duration_since(*last_seen) < self.dedup_window {
+                        return false;  // Deduplicate
+                    }
+                }
+
+                // Race window: another thread can insert between check and insert
+                // Update last seen time (non-atomic write)
+                self.recent_events.insert(key, now);
+                true
+            }
+
+    - path: "crates/fs/src/watcher.rs"
+      patches:
+        - type: "replace"
+          old: "recent_events: DashMap<PathBuf, Instant>,"
+          new: |
+            // Using HashMap instead of DashMap for "simplicity"
+            // Bug: Not thread-safe
+            recent_events: std::collections::HashMap<PathBuf, Instant>,
+
+  config_changes:
+    - file: "crates/fs/src/config.rs"
+      changes:
+        - key: "EVENT_DEDUP_WINDOW_MS"
+          old_value: "100"
+          new_value: "50"
+          comment: "Reduced for responsiveness"
+
+  obfuscation:
+    strategy: "performance_optimization"
+    techniques:
+      - type: "add_misleading_comment"
+        content: "// Simplified from DashMap to reduce lock contention"
+
+trigger:
+  conditions:
+    - "Rapid file system changes (e.g., git checkout, build)"
+    - "Multiple watcher threads processing events"
+    - "Events for same file within dedup window"
+
+  reproduction_steps:
+    - step: 1
+      action: "Open large project in editor"
+    - step: 2
+      action: "Run 'git checkout' to switch branches rapidly"
+    - step: 3
+      action: "Observe some files not updating or updating twice"
+
+observable_symptoms:
+  user_visible:
+    - symptom: "File content doesn't reflect disk state after save"
+    - symptom: "Editor prompts to reload file that was just saved"
+    - symptom: "Diagnostics show stale errors after fix"
+
+  log_messages:
+    - pattern: "DEBUG.*duplicate event processed"
+      level: "debug"
+    - pattern: "WARN.*file state mismatch"
+      level: "warning"
+
+  metrics:
+    - name: "fs_events_processed_total"
+      type: "counter"
+    - name: "fs_events_deduplicated_total"
+      type: "counter"
+    - name: "fs_state_mismatches_total"
+      type: "counter"
+
+difficulty:
+  estimated_human_time_hours: 2
+  frontier_model_pass_rate_percent: 40
+
+golden_path:
+  steps:
+    - step: 1
+      action: "Reproduce with rapid file changes"
+
+    - step: 2
+      action: "Add logging to see duplicate processing"
+
+    - step: 3
+      action: "Identify non-thread-safe HashMap usage"
+
+    - step: 4
+      action: "Replace with concurrent data structure"
+      solutions:
+        preferred: |
+          // Use DashMap for thread-safe concurrent access
+          recent_events: DashMap<PathBuf, Instant>,
+
+          fn should_process_event(&self, event: &FsEvent) -> bool {
+              let now = Instant::now();
+              let key = event.path.clone();
+
+              // Atomic check-and-update
+              self.recent_events
+                  .entry(key)
+                  .and_modify(|last_seen| {
+                      if now.duration_since(*last_seen) >= self.dedup_window {
+                          *last_seen = now;
+                      }
+                  })
+                  .or_insert(now);
+
+              // Return based on whether we updated
+              true  // Simplified - need proper return logic
+          }
+
+grading:
+  outcome_based:
+    - criterion: "No duplicate event processing under load"
+      weight: 0.40
+    - criterion: "No missed events under load"
+      weight: 0.40
+
+  process_based:
+    - criterion: "Identified thread-safety issue"
+      weight: 0.20
+
+hints:
+  progressive:
+    - level: 1
+      content: "The issue is in how file system events are deduplicated."
+    - level: 2
+      content: "Is the deduplication data structure thread-safe?"
+
+tags:
+  - "race-condition"
+  - "file-watcher"
+  - "thread-safety"
+  - "deduplication"

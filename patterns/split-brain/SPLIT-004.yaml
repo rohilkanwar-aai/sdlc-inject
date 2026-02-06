@@ -1,0 +1,186 @@
+id: SPLIT-004
+version: "1.0"
+name: "Leader election during network flap causes dual leaders"
+category: "Distributed System Failures"
+subcategory: "Split-Brain & Network Partitions"
+
+sdlc_phases:
+  primary: "Debugging"
+  secondary: ["Maintenance", "Verification"]
+
+description: |
+  During network instability (rapid connect/disconnect cycles), the leader
+  election algorithm can elect a new leader before the old leader has fully
+  stepped down. Both leaders believe they are authoritative, leading to
+  conflicting decisions and data corruption.
+
+target_codebase:
+  name: "zed"
+  min_version: "0.120.0"
+  language: "rust"
+
+injection:
+  files:
+    - path: "crates/collab/src/election.rs"
+      patches:
+        - type: "replace"
+          old: "async fn run_election(&mut self) -> Result<ElectionResult> {"
+          new: |
+            async fn run_election(&mut self) -> Result<ElectionResult> {
+                // Bug: Election timeout too short for network flaps
+                let timeout = Duration::from_millis(100); // Should be 3000+
+
+                // Bug: Doesn't wait for old leader confirmation of stepdown
+                if self.election_timeout_elapsed() {
+                    self.become_candidate();
+                    let votes = self.request_votes().await?;
+                    if votes > self.cluster_size() / 2 {
+                        // Missing: self.wait_for_old_leader_stepdown().await?;
+                        self.become_leader();
+                        return Ok(ElectionResult::Won);
+                    }
+                }
+
+    - path: "crates/collab/src/leader.rs"
+      patches:
+        - type: "replace"
+          old: "fn is_leader(&self) -> bool {"
+          new: |
+            fn is_leader(&self) -> bool {
+                // Bug: No lease-based leadership verification
+                // Returns true based on local state only
+                self.state == NodeState::Leader
+                // Missing: && self.lease_valid()
+
+  config_changes:
+    - file: "crates/collab/src/config.rs"
+      changes:
+        - key: "ELECTION_TIMEOUT_MS"
+          old_value: "3000"
+          new_value: "100"
+        - key: "HEARTBEAT_INTERVAL_MS"
+          old_value: "500"
+          new_value: "50"
+
+trigger:
+  conditions:
+    - "Network instability causing packet loss > 20%"
+    - "Election timeout < RTT variance"
+    - "Multiple nodes eligible for leadership"
+
+  reproduction_steps:
+    - step: 1
+      action: "Deploy 3-node collab cluster"
+    - step: 2
+      action: "Simulate network flapping with tc"
+      command: |
+        while true; do
+          sudo tc qdisc add dev eth0 root netem loss 50%
+          sleep 0.1
+          sudo tc qdisc del dev eth0 root
+          sleep 0.1
+        done
+    - step: 3
+      action: "Observe dual leaders in logs"
+
+observable_symptoms:
+  user_visible:
+    - symptom: "Edits accepted then reverted"
+    - symptom: "Different users see different document states"
+    - symptom: "Intermittent 'conflict detected' errors"
+
+  log_messages:
+    - pattern: "INFO.*became leader.*term \\d+"
+      level: "info"
+    - pattern: "WARN.*received append from.*but I am leader"
+      level: "warn"
+    - pattern: "ERROR.*dual leader detected"
+      level: "error"
+
+  metrics:
+    - name: "leader_elections_total"
+      type: "counter"
+      anomaly: "Rapid increase during network flaps"
+    - name: "leadership_duration_seconds"
+      type: "histogram"
+      anomaly: "Many very short leadership periods"
+
+difficulty:
+  estimated_human_time_hours: 5
+  frontier_model_pass_rate_percent: 15
+  complexity_factors:
+    - "Distributed consensus is inherently complex"
+    - "Network flaps are hard to reproduce deterministically"
+    - "Requires understanding of Raft/Paxos principles"
+
+golden_path:
+  steps:
+    - step: 1
+      action: "Reproduce with network chaos testing"
+      tools: ["tc", "toxiproxy", "chaos-mesh"]
+
+    - step: 2
+      action: "Add leader state logging"
+      details: "Log term, vote count, and leader ID on every state change"
+
+    - step: 3
+      action: "Identify dual leader scenario"
+      key_insight: "Two nodes both claim leadership in overlapping time windows"
+
+    - step: 4
+      action: "Implement leader leases"
+      solutions:
+        preferred: |
+          fn is_leader(&self) -> bool {
+              self.state == NodeState::Leader
+                  && self.lease_expiry > Instant::now()
+                  && self.term == self.cluster.current_term()
+          }
+
+          async fn become_leader(&mut self) {
+              // Wait for old leader's lease to expire
+              if let Some(old_lease) = self.cluster.current_leader_lease() {
+                  tokio::time::sleep_until(old_lease.expiry).await;
+              }
+
+              self.state = NodeState::Leader;
+              self.lease_expiry = Instant::now() + LEADER_LEASE_DURATION;
+              self.broadcast_leadership().await;
+          }
+
+    - step: 5
+      action: "Increase election timeout appropriately"
+      details: "Election timeout should be >> RTT + processing time"
+
+grading:
+  outcome_based:
+    - criterion: "No dual leaders under network chaos"
+      weight: 0.40
+      verification:
+        type: "chaos_test"
+        iterations: 100
+
+    - criterion: "Leader lease implemented correctly"
+      weight: 0.30
+
+  process_based:
+    - criterion: "Understood leader election timing"
+      weight: 0.15
+    - criterion: "Identified lease requirement"
+      weight: 0.15
+
+hints:
+  progressive:
+    - level: 1
+      content: "What prevents two nodes from both thinking they're the leader?"
+    - level: 2
+      content: "The election timeout is very short. What if the network is unstable?"
+    - level: 3
+      content: "Look up 'leader lease' in distributed systems literature."
+
+tags:
+  - "split-brain"
+  - "leader-election"
+  - "consensus"
+  - "network-partition"
+  - "dual-leader"

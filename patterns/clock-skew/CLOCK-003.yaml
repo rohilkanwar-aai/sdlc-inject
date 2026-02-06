@@ -1,0 +1,149 @@
+id: CLOCK-003
+version: "1.0"
+name: "Cache expiration with clock jump causes stale data"
+category: "Distributed System Failures"
+subcategory: "Clock Skew & Time Issues"
+
+sdlc_phases:
+  primary: "Debugging"
+  secondary: ["Maintenance"]
+
+description: |
+  When the system clock jumps forward (NTP correction, VM migration), cache
+  entries that were set to expire far in the future suddenly appear expired,
+  causing a cache stampede. Conversely, when the clock jumps backward, entries
+  that should expire remain valid, serving stale data.
+
+target_codebase:
+  name: "zed"
+  min_version: "0.120.0"
+  language: "rust"
+
+injection:
+  files:
+    - path: "crates/lsp/src/cache.rs"
+      patches:
+        - type: "replace"
+          old: "fn is_expired(&self, entry: &CacheEntry) -> bool {"
+          new: |
+            fn is_expired(&self, entry: &CacheEntry) -> bool {
+                // Bug: Uses wall clock for expiration check
+                // Clock jumps can cause premature or delayed expiration
+                let now = SystemTime::now();
+                entry.expires_at < now
+                // Missing: monotonic time tracking
+
+        - type: "replace"
+          old: "fn set(&mut self, key: K, value: V, ttl: Duration) {"
+          new: |
+            fn set(&mut self, key: K, value: V, ttl: Duration) {
+                let expires_at = SystemTime::now() + ttl;
+                // Bug: Wall clock can jump, making TTL unreliable
+                self.entries.insert(key, CacheEntry {
+                    value,
+                    expires_at,
+                    // Missing: created_at_monotonic: Instant::now(),
+                    // Missing: ttl,
+                });
+
+  obfuscation:
+    strategy: "simplification"
+
+trigger:
+  conditions:
+    - "Clock jumps forward > cache TTL"
+    - "Clock jumps backward during cache lifetime"
+    - "NTP step adjustment (vs slew)"
+
+  reproduction_steps:
+    - step: 1
+      action: "Populate cache with LSP completions (TTL=5min)"
+    - step: 2
+      action: "Jump system clock forward 10 minutes"
+      command: "sudo date -s '+10 minutes'"
+    - step: 3
+      action: "All cache entries now expired, stampede occurs"
+    - step: 4
+      action: "Or jump backward: stale data served indefinitely"
+
+observable_symptoms:
+  user_visible:
+    - symptom: "Sudden spike in LSP requests after clock change"
+    - symptom: "Autocompletions become slow after VM migration"
+    - symptom: "Stale completions shown after clock goes backward"
+
+  log_messages:
+    - pattern: "DEBUG.*cache miss rate spike"
+      level: "debug"
+    - pattern: "WARN.*\\d+ entries expired simultaneously"
+      level: "warn"
+
+  metrics:
+    - name: "cache_hit_rate"
+      type: "gauge"
+      anomaly: "Sudden drop after clock adjustment"
+    - name: "cache_expirations_total"
+      type: "counter"
+      anomaly: "Spike of many expirations at once"
+
+difficulty:
+  estimated_human_time_hours: 1.5
+  frontier_model_pass_rate_percent: 50
+
+golden_path:
+  steps:
+    - step: 1
+      action: "Reproduce with clock manipulation"
+    - step: 2
+      action: "Identify wall clock usage in cache"
+    - step: 3
+      action: "Implement monotonic time-based expiration"
+      solutions:
+        preferred: |
+          struct CacheEntry<V> {
+              value: V,
+              created_at: Instant,  // Monotonic
+              ttl: Duration,
+          }
+
+          fn is_expired(&self, entry: &CacheEntry<V>) -> bool {
+              entry.created_at.elapsed() > entry.ttl
+          }
+
+          fn set(&mut self, key: K, value: V, ttl: Duration) {
+              self.entries.insert(key, CacheEntry {
+                  value,
+                  created_at: Instant::now(),
+                  ttl,
+              });
+          }
+
+grading:
+  outcome_based:
+    - criterion: "Cache unaffected by clock jumps"
+      weight: 0.50
+      verification:
+        type: "chaos_test"
+        description: "Jump clock and verify cache behavior"
+
+    - criterion: "No stale data after backward jump"
+      weight: 0.25
+
+  process_based:
+    - criterion: "Identified wall clock issue"
+      weight: 0.15
+    - criterion: "Used Instant for monotonic time"
+      weight: 0.10
+
+hints:
+  progressive:
+    - level: 1
+      content: "What happens to time-based expiration when the clock changes?"
+    - level: 2
+      content: "SystemTime can go backward. Instant cannot."
+
+tags:
+  - "clock-skew"
+  - "cache"
+  - "ttl"
+  - "monotonic-time"

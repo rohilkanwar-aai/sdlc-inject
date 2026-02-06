@@ -1,0 +1,64 @@
+[
+  {
+    "timestamp": "2026-02-05T19:58:25.394071Z",
+    "type": "default",
+    "category": "http",
+    "message": "HTTP request received",
+    "data": {
+      "method": "POST",
+      "url": "/api/buffers"
+    },
+    "level": "info"
+  },
+  {
+    "timestamp": "2026-02-05T20:01:25.394071Z",
+    "type": "default",
+    "category": "query",
+    "message": "Database query",
+    "data": {
+      "query": "SELECT * FROM buffers WHERE id = $1"
+    },
+    "level": "info"
+  },
+  {
+    "timestamp": "2026-02-05T20:09:25.394071Z",
+    "type": "default",
+    "category": "info",
+    "message": "Buffer availability check",
+    "data": {
+      "buffer_id": "12345",
+      "available": true
+    },
+    "level": "info"
+  },
+  {
+    "timestamp": "2026-02-05T20:06:25.394071Z",
+    "type": "default",
+    "category": "debug",
+    "message": "Attempting lock acquisition",
+    "data": {
+      "buffer_id": "12345"
+    },
+    "level": "info"
+  },
+  {
+    "timestamp": "2026-02-05T20:06:25.394071Z",
+    "type": "default",
+    "category": "query",
+    "message": "Database query",
+    "data": {
+      "query": "UPDATE buffers SET locked_by = $1"
+    },
+    "level": "info"
+  },
+  {
+    "timestamp": "2026-02-05T20:07:25.394071Z",
+    "type": "default",
+    "category": "error",
+    "message": "Lock acquisition failed",
+    "data": {
+      "reason": "already_locked"
+    },
+    "level": "error"
+  }
+]

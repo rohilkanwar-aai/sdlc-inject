@@ -1,0 +1,44 @@
+{
+  "id": 5482368,
+  "number": 9343,
+  "title": "[Bug] Check-then-act buffer ownership race",
+  "body": "## Description\n\nA race condition in buffer ownership checking allows two users to\nsimultaneously claim ownership of the same buffer, leading to\nconflicting edits and potential data loss. The bug occurs because\nthe ownership check and acquisition are not atomic operations.\n\n\n## Steps to Reproduce\n\n1. Start collab server with sdlc_inject feature enabled\n2. User A connects and opens project P\n3. User B joins project P\n4. Simultaneously (within 100ms), both users open file F\n5. Observe: Both users see 'buffer acquired' but subsequent edits conflict\n\n\n## Expected Behavior\n\nOperations should complete successfully without conflicts.\n\n## Actual Behavior\n\n- Edits appear then disappear\n- Cursor jumps unexpectedly to other user's position\n- Undo doesn't restore expected state\n- Content appears duplicated or garbled\n\n\n## Environment\n\n- OS: macOS 14.0\n- App Version: v0.129.2\n- Users affected: ~37\n\n## Additional Context\n\nThis appears to happen more frequently when multiple users are editing the same file.\n\nPossibly related to #418 (similar symptoms).\n",
+  "state": "open",
+  "labels": [
+    {
+      "name": "bug",
+      "color": "d73a4a"
+    },
+    {
+      "name": "priority: high",
+      "color": "ff6b6b"
+    },
+    {
+      "name": "distributed-system-failures",
+      "color": "0366d6"
+    },
+    {
+      "name": "needs-investigation",
+      "color": "fbca04"
+    }
+  ],
+  "user": {
+    "login": "affected-user",
+    "id": 78527,
+    "type": "User"
+  },
+  "assignees": [
+    {
+      "login": "oncall-engineer",
+      "id": 60842
+    }
+  ],
+  "milestone": {
+    "title": "v0.130.0",
+    "number": 28
+  },
+  "created_at": "2026-02-05T17:12:25.398049Z",
+  "updated_at": "2026-02-05T19:55:25.398049Z",
+  "comments": 8,
+  "html_url": "https://github.com/org/zed/issues/3371"
+}

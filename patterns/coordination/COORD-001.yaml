@@ -1,0 +1,349 @@
+id: COORD-001
+version: "1.0"
+name: "Distributed lock double-grant during lease expiration"
+category: "Distributed System Failures"
+subcategory: "Consensus & Coordination"
+
+sdlc_phases:
+  primary: "Debugging"
+  secondary: ["Maintenance", "Verification"]
+
+description: |
+  A distributed lock can be granted to two holders simultaneously when
+  the lease expiration check races with lock acquisition. Process A holds
+  a lock, pauses (e.g., GC), the lease expires, Process B acquires the lock,
+  then Process A resumes and still believes it holds the lock.
+
+target_codebase:
+  name: "zed"
+  min_version: "0.120.0"
+  language: "rust"
+
+injection:
+  files:
+    - path: "crates/collab/src/locks.rs"
+      patches:
+        - type: "replace"
+          old: "pub struct DistributedLock {"
+          new: |
+            pub struct DistributedLock {
+                id: LockId,
+                holder: Option<ProcessId>,
+                expiry: Option<Instant>,
+                // Missing: fencing_token for safe lock handoff
+            }
+
+        - type: "replace"
+          old: "async fn acquire(&mut self, requester: ProcessId) -> Result<LockGuard> {"
+          new: |
+            async fn acquire(&mut self, requester: ProcessId) -> Result<LockGuard> {
+                // Check if lock is expired or free
+                if self.holder.is_some() {
+                    if let Some(expiry) = self.expiry {
+                        if Instant::now() < expiry {
+                            return Err(Error::LockHeld);
+                        }
+                        // Lock expired - but we don't notify old holder!
+                    } else {
+                        return Err(Error::LockHeld);
+                    }
+                }
+
+                // Grant lock without fencing token
+                self.holder = Some(requester);
+                self.expiry = Some(Instant::now() + self.lease_duration);
+
+                Ok(LockGuard {
+                    lock_id: self.id,
+                    // Missing: fencing_token
+                })
+
+        - type: "replace"
+          old: "fn is_valid(&self, guard: &LockGuard) -> bool {"
+          new: |
+            fn is_valid(&self, guard: &LockGuard) -> bool {
+                // Bug: Only checks lock_id, not fencing token
+                // Old holder can still pass this check
+                guard.lock_id == self.id
+
+    - path: "crates/collab/src/db/buffers.rs"
+      patches:
+        - type: "replace"
+          old: "async fn mutate_buffer(&self, buffer_id: BufferId, mutation: Mutation) -> Result<()> {"
+          new: |
+            async fn mutate_buffer(&self, buffer_id: BufferId, mutation: Mutation) -> Result<()> {
+                // Acquire lock (but don't validate fencing token on operations)
+                let guard = self.locks.acquire(buffer_id.into()).await?;
+
+                // Operations don't verify they still hold valid lock
+                self.apply_mutation(buffer_id, mutation).await?;
+
+                Ok(())
+            }
+
+  config_changes:
+    - file: "crates/collab/src/config.rs"
+      changes:
+        - key: "LOCK_LEASE_DURATION_MS"
+          old_value: "30000"
+          new_value: "5000"
+          comment: "Reduced lease for faster recovery"
+
+  obfuscation:
+    strategy: "simplification"
+    techniques:
+      - type: "add_misleading_comment"
+        content: "// Simplified lock implementation - fencing unnecessary with short leases"
+      - type: "remove_code"
+        description: "Remove 'unused' fencing token field"
+
+trigger:
+  conditions:
+    - "Lock holder experiences pause (GC, I/O block, network delay)"
+    - "Pause duration > lease_duration"
+    - "Another process attempts to acquire same lock during pause"
+    - "Original holder resumes and continues operating"
+
+  reproduction_steps:
+    - step: 1
+      action: "Process A acquires lock on buffer B"
+    - step: 2
+      action: "Inject pause in Process A (simulate GC)"
+      command: |
+        # Send SIGSTOP to pause process
+        kill -STOP $PID_A
+        sleep 6  # Wait for lease to expire
+    - step: 3
+      action: "Process C acquires lock on buffer B (succeeds - lease expired)"
+    - step: 4
+      action: "Resume Process A"
+      command: "kill -CONT $PID_A"
+    - step: 5
+      action: "Both A and C now operate on buffer B simultaneously"
+
+observable_symptoms:
+  user_visible:
+    - symptom: "Data corruption or unexpected overwrites"
+    - symptom: "Conflicting operations succeed without error"
+    - symptom: "Audit log shows two 'holders' operating simultaneously"
+
+  log_messages:
+    - pattern: "WARN.*lock holder mismatch"
+      level: "warning"
+    - pattern: "ERROR.*concurrent modification detected"
+      level: "error"
+    - pattern: "DEBUG.*lock acquired after expiry"
+      level: "debug"
+
+  metrics:
+    - name: "lock_expirations_total"
+      type: "counter"
+    - name: "concurrent_lock_operations_total"
+      type: "counter"
+      anomaly: "> 0 indicates double-grant"
+    - name: "lock_hold_duration_seconds"
+      type: "histogram"
+
+difficulty:
+  estimated_human_time_hours: 5
+  frontier_model_pass_rate_percent: 15
+  complexity_factors:
+    - "Requires understanding of distributed locking theory"
+    - "Bug only manifests during specific timing conditions"
+    - "Concept of fencing tokens may be unfamiliar"
+    - "Need to simulate process pause"
+
+failure_modes:
+  common:
+    - mode: "Increase lease duration"
+      description: "Makes double-grant less likely but still possible"
+    - mode: "Add heartbeat"
+      description: "Doesn't prevent old holder from operating after resume"
+    - mode: "Check holder ID"
+      description: "Old holder still has valid holder ID"
+
+  subtle:
+    - mode: "Add generation counter without using it"
+      description: "Adds fencing token but doesn't validate in operations"
+    - mode: "Validate token only in acquire"
+      description: "Need to validate on every protected operation"
+
+golden_path:
+  steps:
+    - step: 1
+      action: "Understand the failure scenario"
+      details: "Read about fencing tokens and distributed locking"
+      resources:
+        - "https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html"
+
+    - step: 2
+      action: "Reproduce the double-grant"
+      commands:
+        - "# Terminal 1: Start process A, acquire lock"
+        - "# Terminal 2: Send SIGSTOP to A, wait for expiry"
+        - "# Terminal 3: Start process C, acquire same lock"
+        - "# Terminal 2: Send SIGCONT to A"
+        - "# Observe both operating"
+
+    - step: 3
+      action: "Trace lock implementation"
+      search_queries:
+        - "DistributedLock"
+        - "acquire"
+        - "is_valid"
+        - "fencing"
+
+    - step: 4
+      action: "Identify missing fencing token"
+      key_insight: |
+        The lock uses lease expiration but doesn't include a fencing token.
+        When the lease expires, the old holder can still operate because
+        nothing prevents it from continuing.
+
+    - step: 5
+      action: "Implement fencing tokens"
+      solutions:
+        lock_with_fencing: |
+          pub struct DistributedLock {
+              id: LockId,
+              holder: Option<ProcessId>,
+              expiry: Option<Instant>,
+              fencing_token: u64,  // Monotonically increasing
+          }
+
+          async fn acquire(&mut self, requester: ProcessId) -> Result<LockGuard> {
+              // ... expiry check ...
+
+              // Increment fencing token on every acquisition
+              self.fencing_token += 1;
+              self.holder = Some(requester);
+              self.expiry = Some(Instant::now() + self.lease_duration);
+
+              Ok(LockGuard {
+                  lock_id: self.id,
+                  fencing_token: self.fencing_token,
+              })
+          }
+
+        protected_operation: |
+          async fn mutate_buffer(&self, buffer_id: BufferId, mutation: Mutation, guard: &LockGuard) -> Result<()> {
+              // Validate fencing token BEFORE every protected operation
+              let current_token = self.locks.get_current_token(buffer_id.into()).await?;
+              if guard.fencing_token < current_token {
+                  return Err(Error::StaleLockGuard);
+              }
+
+              self.apply_mutation(buffer_id, mutation).await
+          }
+
+        storage_validation: |
+          // Storage layer also validates fencing token
+          async fn write_with_fence(&self, key: &str, value: &[u8], fence: u64) -> Result<()> {
+              // Compare-and-swap with fencing token
+              let result = sqlx::query!(
+                  "UPDATE data SET value = $1, fence = $2
+                   WHERE key = $3 AND fence < $2",
+                  value, fence, key
+              ).execute(&self.pool).await?;
+
+              if result.rows_affected() == 0 {
+                  return Err(Error::FencingTokenRejected);
+              }
+              Ok(())
+          }
+
+    - step: 6
+      action: "Add tests for double-grant scenario"
+      test_code: |
+        #[tokio::test]
+        async fn test_fencing_prevents_double_grant_operation() {
+            let lock = DistributedLock::new(LockId(1));
+
+            // Process A acquires lock
+            let guard_a = lock.acquire(ProcessId(1)).await.unwrap();
+
+            // Simulate lease expiry
+            tokio::time::advance(Duration::from_secs(10)).await;
+
+            // Process B acquires lock (succeeds - lease expired)
+            let guard_b = lock.acquire(ProcessId(2)).await.unwrap();
+            assert!(guard_b.fencing_token > guard_a.fencing_token);
+
+            // Process A tries to operate with old guard
+            let result = lock.validate_operation(&guard_a).await;
+            assert!(result.is_err());  // Should be rejected
+
+            // Process B can operate
+            let result = lock.validate_operation(&guard_b).await;
+            assert!(result.is_ok());
+        }
+
+grading:
+  outcome_based:
+    - criterion: "Old lock holder operations rejected after expiry"
+      weight: 0.35
+      verification:
+        type: "fencing_test"
+
+    - criterion: "Fencing token validated on every operation"
+      weight: 0.25
+      verification:
+        type: "code_analysis"
+        pattern: "guard.fencing_token"
+
+    - criterion: "Storage layer enforces fencing"
+      weight: 0.15
+
+  process_based:
+    - criterion: "Reproduced double-grant scenario"
+      weight: 0.10
+    - criterion: "Identified missing fencing token"
+      weight: 0.15
+
+hints:
+  progressive:
+    - level: 1
+      content: "What happens if a lock holder pauses for longer than the lease duration?"
+    - level: 2
+      content: "When the old holder resumes, how does it know its lock is no longer valid?"
+    - level: 3
+      content: "Read about fencing tokens in distributed locking."
+    - level: 4
+      content: "You need a monotonically increasing token that is checked on every protected operation, not just on lock acquisition."
+
+environment:
+  process_control:
+    technique: "SIGSTOP/SIGCONT"
+    scripts:
+      pause_process: |
+        #!/bin/bash
+        PID=$1
+        DURATION=$2
+        kill -STOP $PID
+        sleep $DURATION
+        kill -CONT $PID
+
+related_patterns:
+  - id: "SPLIT-001"
+    relationship: "compounds"
+    description: "Network partition can cause similar double-grant"
+  - id: "CLOCK-009"
+    relationship: "related"
+    description: "Clock drift affects lease expiration timing"
+  - id: "RACE-001"
+    relationship: "similar"
+    description: "Both involve unsafe check-then-act"
+
+related_incidents:
+  - url: "https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html"
+    title: "How to do distributed locking (Kleppmann)"
+  - url: "https://redis.io/docs/latest/operate/oss_and_stack/management/replication/"
+    title: "Redis replication and Redlock controversy"
+
+tags:
+  - "distributed-lock"
+  - "fencing-token"
+  - "lease-expiration"
+  - "consensus"
+  - "double-grant"
+  - "GC-pause"

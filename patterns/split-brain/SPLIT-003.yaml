@@ -1,0 +1,149 @@
+id: SPLIT-003
+version: "1.0"
+name: "Reconnect with stale state causes conflict"
+category: "Distributed System Failures"
+subcategory: "Split-Brain & Network Partitions"
+
+sdlc_phases:
+  primary: "Debugging"
+  secondary: ["Maintenance"]
+
+description: |
+  After a network disconnection, the client reconnects with a stale view of
+  the document state. The reconnection logic doesn't properly reconcile the
+  client's offline edits with changes made by other users during the
+  disconnection, leading to lost edits or corrupted document state.
+
+target_codebase:
+  name: "zed"
+  min_version: "0.120.0"
+  language: "rust"
+
+injection:
+  files:
+    - path: "crates/client/src/reconnect.rs"
+      patches:
+        - type: "replace"
+          old: "async fn reconnect(&mut self) -> Result<()> {"
+          new: |
+            async fn reconnect(&mut self) -> Result<()> {
+                // Bug: Sends local state without checking server's current version
+                let local_state = self.get_local_document_state();
+
+                // Missing: let server_state = self.fetch_server_state().await?;
+                // Missing: let merged = self.three_way_merge(base, local_state, server_state)?;
+
+                // Overwrites server state with local state
+                self.connection.send(SyncRequest::FullState(local_state)).await?;
+
+    - path: "crates/collab/src/sync.rs"
+      patches:
+        - type: "replace"
+          old: "fn handle_sync_request(&mut self, req: SyncRequest) -> Result<SyncResponse> {"
+          new: |
+            fn handle_sync_request(&mut self, req: SyncRequest) -> Result<SyncResponse> {
+                match req {
+                    SyncRequest::FullState(client_state) => {
+                        // Bug: Accepts client state unconditionally
+                        // Should compare versions and request incremental sync
+                        self.document_state = client_state;
+                        Ok(SyncResponse::Accepted)
+                    }
+
+  obfuscation:
+    strategy: "simplification"
+    techniques:
+      - type: "comment_misdirection"
+        content: "// Simplified reconnection - full state sync is most reliable"
+        location: "near_injection"
+
+trigger:
+  conditions:
+    - "Client disconnected for > 30 seconds"
+    - "Other users made edits during disconnection"
+    - "Client made offline edits"
+
+  reproduction_steps:
+    - step: 1
+      action: "User A and B both connected to document"
+    - step: 2
+      action: "Disconnect User A's network"
+    - step: 3
+      action: "User B makes edits while A is disconnected"
+    - step: 4
+      action: "User A makes offline edits"
+    - step: 5
+      action: "Reconnect User A"
+    - step: 6
+      action: "Observe User B's edits are lost"
+
+observable_symptoms:
+  user_visible:
+    - symptom: "Collaborator's edits disappear after reconnection"
+    - symptom: "Document reverts to stale state"
+    - symptom: "Undo history corrupted"
+
+  log_messages:
+    - pattern: "INFO.*full state sync.*accepted"
+      level: "info"
+    - pattern: "WARN.*version mismatch.*ignored"
+      level: "warn"
+
+difficulty:
+  estimated_human_time_hours: 3
+  frontier_model_pass_rate_percent: 30
+
+golden_path:
+  steps:
+    - step: 1
+      action: "Reproduce with simulated disconnect/reconnect"
+    - step: 2
+      action: "Add version logging to sync messages"
+    - step: 3
+      action: "Identify that reconnect sends full state without version check"
+    - step: 4
+      action: "Implement proper state reconciliation"
+      solutions:
+        preferred: |
+          async fn reconnect(&mut self) -> Result<()> {
+              // First, get server's current state version
+              let server_version = self.connection.send(SyncRequest::GetVersion).await?;
+              let local_version = self.local_version;
+
+              if server_version == local_version {
+                  // Simple case: no conflict
+                  self.send_local_changes().await?;
+              } else {
+                  // Need to reconcile
+                  let server_state = self.connection.send(SyncRequest::GetStateSince(local_version)).await?;
+                  let merged = self.operational_transform(self.local_changes, server_state)?;
+                  self.connection.send(SyncRequest::IncrementalSync(merged)).await?;
+              }
+              Ok(())
+          }
+
+grading:
+  outcome_based:
+    - criterion: "No data loss during reconnection"
+      weight: 0.40
+    - criterion: "Proper version reconciliation"
+      weight: 0.30
+
+  process_based:
+    - criterion: "Identified missing version check"
+      weight: 0.15
+    - criterion: "Understood operational transform need"
+      weight: 0.15
+
+hints:
+  progressive:
+    - level: 1
+      content: "What happens to edits made while offline?"
+    - level: 2
+      content: "The reconnect sends full state without checking what changed on server."
+
+tags:
+  - "split-brain"
+  - "reconnection"
+  - "state-sync"
+  - "data-loss"

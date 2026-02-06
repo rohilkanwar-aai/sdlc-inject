@@ -1,0 +1,113 @@
+[
+  {
+    "id": "e6dd36b2-1806-ac1a-97db-ef9c25a70ff9",
+    "alert_key": "error_rate_high",
+    "type": "alert",
+    "status": "triggered",
+    "severity": "critical",
+    "summary": "Error rate > 5% on zed",
+    "source": "prometheus",
+    "created_at": "2026-02-05T18:03:25.396293Z",
+    "suppressed": false,
+    "body": {
+      "type": "alert_body",
+      "contexts": [
+        {
+          "type": "link",
+          "href": "https://grafana.internal/d/race-001",
+          "text": "View Dashboard"
+        },
+        {
+          "type": "link",
+          "href": "https://sentry.io/issues/?query=RACE-001",
+          "text": "View Sentry Errors"
+        },
+        {
+          "type": "link",
+          "href": "https://logs.internal/explore?pattern=RACE-001",
+          "text": "View Logs"
+        }
+      ],
+      "details": {
+        "alert_name": "High Error Rate",
+        "firing_value": 6.193380665734421,
+        "threshold": 5.0,
+        "environment": "production"
+      }
+    }
+  },
+  {
+    "id": "6e23942a-9d1c-83df-85c5-6ccb14272162",
+    "alert_key": "latency_p99_high",
+    "type": "alert",
+    "status": "triggered",
+    "severity": "critical",
+    "summary": "P99 latency > 2000ms",
+    "source": "prometheus",
+    "created_at": "2026-02-05T18:12:25.396293Z",
+    "suppressed": false,
+    "body": {
+      "type": "alert_body",
+      "contexts": [
+        {
+          "type": "link",
+          "href": "https://grafana.internal/d/race-001",
+          "text": "View Dashboard"
+        },
+        {
+          "type": "link",
+          "href": "https://sentry.io/issues/?query=RACE-001",
+          "text": "View Sentry Errors"
+        },
+        {
+          "type": "link",
+          "href": "https://logs.internal/explore?pattern=RACE-001",
+          "text": "View Logs"
+        }
+      ],
+      "details": {
+        "alert_name": "Latency Spike",
+        "firing_value": 18.334635047788012,
+        "threshold": 5.0,
+        "environment": "production"
+      }
+    }
+  },
+  {
+    "id": "8427b431-755e-c80d-134f-0779dff497b7",
+    "alert_key": "pool_exhaustion",
+    "type": "alert",
+    "status": "triggered",
+    "severity": "critical",
+    "summary": "Connection pool utilization at 100%",
+    "source": "prometheus",
+    "created_at": "2026-02-05T18:07:25.396293Z",
+    "suppressed": false,
+    "body": {
+      "type": "alert_body",
+      "contexts": [
+        {
+          "type": "link",
+          "href": "https://grafana.internal/d/race-001",
+          "text": "View Dashboard"
+        },
+        {
+          "type": "link",
+          "href": "https://sentry.io/issues/?query=RACE-001",
+          "text": "View Sentry Errors"
+        },
+        {
+          "type": "link",
+          "href": "https://logs.internal/explore?pattern=RACE-001",
+          "text": "View Logs"
+        }
+      ],
+      "details": {
+        "alert_name": "Connection Pool",
+        "firing_value": 18.53498499231629,
+        "threshold": 5.0,
+        "environment": "production"
+      }
+    }
+  }
+]

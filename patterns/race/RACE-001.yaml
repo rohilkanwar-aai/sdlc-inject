@@ -1,0 +1,519 @@
+id: RACE-001
+version: "1.0"
+name: "Check-then-act buffer ownership race"
+category: "Distributed System Failures"
+subcategory: "Race Conditions"
+
+sdlc_phases:
+  primary: "Debugging"
+  secondary: ["Verification", "Maintenance"]
+
+description: |
+  A race condition in buffer ownership checking allows two users to
+  simultaneously claim ownership of the same buffer, leading to
+  conflicting edits and potential data loss. The bug occurs because
+  the ownership check and acquisition are not atomic operations.
+
+target_codebase:
+  name: "zed"
+  min_version: "0.120.0"
+  language: "rust"
+
+injection:
+  files:
+    - path: "crates/collab/src/db/buffers.rs"
+      patches:
+        - type: "insert_after"
+          anchor: "fn acquire_buffer_lock"
+          content: |
+            // Network simulation for realistic latency testing
+            #[cfg(feature = "sdlc_inject")]
+            {
+                use std::time::Duration;
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        - type: "replace"
+          old: "let lock_acquired = self.try_acquire_lock(buffer_id).await?;"
+          new: |
+            // Check if buffer is available (non-atomic check)
+            let is_available = self.check_buffer_available(buffer_id).await?;
+            if !is_available {
+                return Err(Error::BufferLocked);
+            }
+            // Race window: another request can acquire between check and lock
+            let lock_acquired = self.try_acquire_lock(buffer_id).await?;
+
+    - path: "crates/collab/src/db/mod.rs"
+      patches:
+        - type: "insert"
+          location: "after_imports"
+          content: |
+            // Helper for buffer availability check (introduces race window)
+            impl Database {
+                pub async fn check_buffer_available(&self, buffer_id: BufferId) -> Result<bool> {
+                    let row = sqlx::query_scalar!(
+                        "SELECT locked_by IS NULL as available FROM buffers WHERE id = $1",
+                        buffer_id.0
+                    )
+                    .fetch_optional(&self.pool)
+                    .await?;
+                    Ok(row.unwrap_or(true))
+                }
+            }
+
+  config_changes:
+    - file: "crates/collab/src/config.rs"
+      changes:
+        - key: "BUFFER_LOCK_TIMEOUT_MS"
+          old_value: "5000"
+          new_value: "100"
+          comment: "Reduced for performance optimization"
+
+  feature_flags:
+    - name: "sdlc_inject"
+      description: "Enables injected timing delays for testing"
+
+  obfuscation:
+    strategy: "legitimate_refactor"
+    techniques:
+      - type: "rename_function"
+        from: "check_then_acquire_buffer"
+        to: "acquire_buffer_with_availability_check"
+      - type: "add_misleading_comment"
+        location: "near_race_window"
+        content: "// Optimization: pre-check availability to reduce lock contention"
+      - type: "split_across_commits"
+        commit_messages:
+          - "refactor: extract buffer availability check for reuse"
+          - "perf: reduce lock contention with pre-check"
+
+trigger:
+  conditions:
+    - description: "Two users connected to same project"
+      required: true
+    - description: "Both attempt to open same file within 100ms window"
+      required: true
+    - description: "Network latency > 20ms between clients and server"
+      required: false
+      increases_probability: true
+
+  reproduction_steps:
+    - step: 1
+      action: "Start collab server with sdlc_inject feature enabled"
+      command: "cargo run --features sdlc_inject -p collab"
+    - step: 2
+      action: "User A connects and opens project P"
+    - step: 3
+      action: "User B joins project P"
+    - step: 4
+      action: "Simultaneously (within 100ms), both users open file F"
+      automation: |
+        # k6 script or custom test harness
+        parallel {
+          user_a.open_file(project_id, "src/main.rs")
+          user_b.open_file(project_id, "src/main.rs")
+        }
+    - step: 5
+      action: "Observe: Both users see 'buffer acquired' but subsequent edits conflict"
+
+  expected_frequency: "~30% reproduction rate under load"
+
+observable_symptoms:
+  user_visible:
+    - symptom: "Edits appear then disappear"
+      frequency: "Every occurrence"
+    - symptom: "Cursor jumps unexpectedly to other user's position"
+      frequency: "Intermittent"
+    - symptom: "Undo doesn't restore expected state"
+      frequency: "When conflict occurs"
+    - symptom: "Content appears duplicated or garbled"
+      frequency: "Severe cases"
+
+  log_messages:
+    - pattern: "WARN.*buffer ownership conflict detected"
+      level: "warning"
+      file: "collab.log"
+    - pattern: "ERROR.*multiple owners for buffer_id=\\d+"
+      level: "error"
+      file: "collab.log"
+    - pattern: "DEBUG.*lock acquisition failed after availability check passed"
+      level: "debug"
+      file: "collab.log"
+
+  metrics:
+    - name: "buffer_conflicts_total"
+      type: "counter"
+      description: "Number of detected buffer ownership conflicts"
+      alert_threshold: "> 0"
+    - name: "buffer_lock_retries_total"
+      type: "counter"
+      description: "Number of lock acquisition retry attempts"
+    - name: "buffer_acquisition_duration_seconds"
+      type: "histogram"
+      description: "Time to acquire buffer lock"
+      anomaly: "bimodal distribution indicates race"
+
+  database_state:
+    - query: "SELECT buffer_id, COUNT(*) as owner_count FROM buffer_locks GROUP BY buffer_id HAVING COUNT(*) > 1"
+      expected_normal: "0 rows"
+      indicates_bug: "> 0 rows"
+
+difficulty:
+  estimated_human_time_hours: 3
+  frontier_model_pass_rate_percent: 25
+  complexity_factors:
+    - "Requires understanding of distributed locking"
+    - "Race window is timing-dependent"
+    - "Bug is hidden in 'optimization' refactor"
+    - "Symptoms are intermittent"
+
+failure_modes:
+  common:
+    - mode: "Blame network"
+      description: "Assumes network latency is the root cause"
+      detection: "Agent focuses on network config without reading lock code"
+    - mode: "Increase timeout"
+      description: "Increases BUFFER_LOCK_TIMEOUT_MS without fixing race"
+      detection: "Config change without code change"
+    - mode: "Add retry loop"
+      description: "Adds retries around lock acquisition"
+      detection: "Retry logic added but race still exists"
+    - mode: "Restart services"
+      description: "Restarts collab server as 'fix'"
+      detection: "Service restart commands without code investigation"
+
+  subtle:
+    - mode: "Wrong lock type"
+      description: "Adds mutex but in wrong location"
+      detection: "Lock added but not around check-then-act"
+    - mode: "Partial fix"
+      description: "Fixes one code path but misses others"
+      detection: "Some races eliminated but conflicts still occur"
+    - mode: "Pessimistic overkill"
+      description: "Adds global lock that destroys concurrency"
+      detection: "Lock contention metrics spike, throughput drops"
+
+golden_path:
+  overview: |
+    A competent engineer would: reproduce the issue, check logs for conflicts,
+    trace the lock acquisition code, identify the check-then-act anti-pattern,
+    implement atomic lock acquisition, and add concurrent tests.
+
+  steps:
+    - step: 1
+      action: "Reproduce the issue"
+      details: "Open same file from two clients simultaneously"
+      tools: ["terminal", "two zed instances", "network simulation"]
+      evidence: "Transcript shows reproduction attempt with timing"
+      time_estimate_minutes: 15
+
+    - step: 2
+      action: "Check logs for ownership conflicts"
+      details: "Search for 'buffer ownership', 'conflict', 'lock' in logs"
+      tools: ["grep", "log viewer", "journalctl"]
+      commands:
+        - "grep -i 'conflict\\|ownership\\|lock' collab.log"
+        - "grep -E 'WARN|ERROR' collab.log | tail -100"
+      evidence: "Log search commands executed"
+      time_estimate_minutes: 10
+
+    - step: 3
+      action: "Check metrics for anomalies"
+      details: "Look at buffer_conflicts_total, lock acquisition histograms"
+      tools: ["prometheus", "grafana"]
+      evidence: "Metrics queries or dashboard views"
+      time_estimate_minutes: 10
+
+    - step: 4
+      action: "Trace buffer acquisition code path"
+      details: "Find where locks are acquired, understand the flow"
+      tools: ["code search", "IDE navigation"]
+      search_queries:
+        - "acquire_buffer_lock"
+        - "try_acquire_lock"
+        - "check_buffer_available"
+      evidence: "File reads of buffers.rs and related files"
+      time_estimate_minutes: 20
+
+    - step: 5
+      action: "Identify the race window"
+      details: "Recognize separation between availability check and lock acquisition"
+      key_insight: "check_buffer_available() and try_acquire_lock() are separate operations"
+      evidence: "Agent mentions 'race', 'atomic', 'check-then-act', or 'TOCTOU'"
+      time_estimate_minutes: 15
+
+    - step: 6
+      action: "Implement atomic lock acquisition"
+      details: "Use database transaction or compare-and-swap"
+      solutions:
+        preferred: |
+          // Use SELECT FOR UPDATE or atomic UPDATE
+          let lock_acquired = sqlx::query!(
+              "UPDATE buffers SET locked_by = $1
+               WHERE id = $2 AND locked_by IS NULL
+               RETURNING id",
+              user_id, buffer_id
+          ).fetch_optional(&self.pool).await?;
+        alternative: |
+          // Use advisory lock
+          sqlx::query!("SELECT pg_advisory_xact_lock($1)", buffer_id)
+              .execute(&self.pool).await?;
+      evidence: "Code change making check-and-acquire atomic"
+      time_estimate_minutes: 30
+
+    - step: 7
+      action: "Add concurrent test"
+      details: "Test with parallel buffer acquisitions to verify fix"
+      test_code: |
+        #[tokio::test]
+        async fn test_concurrent_buffer_acquisition() {
+            let db = setup_test_db().await;
+            let buffer_id = create_test_buffer(&db).await;
+
+            let results: Vec<_> = futures::future::join_all(
+                (0..10).map(|i| {
+                    let db = db.clone();
+                    async move {
+                        db.acquire_buffer_lock(buffer_id, UserId(i)).await
+                    }
+                })
+            ).await;
+
+            let successes: Vec<_> = results.iter().filter(|r| r.is_ok()).collect();
+            assert_eq!(successes.len(), 1, "Only one acquisition should succeed");
+        }
+      evidence: "New test file or test function added"
+      time_estimate_minutes: 20
+
+    - step: 8
+      action: "Verify fix under load"
+      details: "Run load test to confirm race is eliminated"
+      commands:
+        - "k6 run concurrent-buffer-open.js"
+        - "cargo test -p collab -- --test-threads=1 concurrent"
+      evidence: "Load test results showing zero conflicts"
+      time_estimate_minutes: 15
+
+grading:
+  total_weight: 1.0
+
+  outcome_based:
+    - criterion: "Race condition eliminated"
+      weight: 0.35
+      verification:
+        type: "concurrent_test"
+        script: |
+          #!/bin/bash
+          # Run concurrent acquisition test 100 times
+          for i in {1..100}; do
+            result=$(cargo test -p collab test_concurrent_buffer_acquisition 2>&1)
+            if echo "$result" | grep -q "FAILED"; then
+              echo "FAIL: Race condition still exists"
+              exit 1
+            fi
+          done
+          echo "PASS: No races detected in 100 runs"
+        expected_exit_code: 0
+
+    - criterion: "No deadlock introduced"
+      weight: 0.15
+      verification:
+        type: "timeout_test"
+        timeout_seconds: 30
+        script: |
+          timeout 30 cargo test -p collab -- --test-threads=4 || exit 1
+
+    - criterion: "No performance regression"
+      weight: 0.10
+      verification:
+        type: "benchmark"
+        baseline_metric: "buffer_acquisition_p99_ms"
+        max_regression_percent: 20
+
+    - criterion: "Existing tests pass"
+      weight: 0.10
+      verification:
+        type: "test_suite"
+        command: "cargo test -p collab"
+        expected_exit_code: 0
+
+  process_based:
+    - criterion: "Reproduced issue before fixing"
+      weight: 0.05
+      evidence_patterns:
+        - "opened.*two.*instances"
+        - "reproduced.*conflict"
+        - "triggered.*race"
+
+    - criterion: "Read relevant code before changing"
+      weight: 0.05
+      evidence_patterns:
+        - "Read.*buffers.rs"
+        - "Read.*lock"
+
+    - criterion: "Identified check-then-act anti-pattern"
+      weight: 0.10
+      evidence_patterns:
+        - "race.*condition"
+        - "check.*then.*act"
+        - "TOCTOU"
+        - "time.*of.*check.*time.*of.*use"
+        - "not.*atomic"
+
+    - criterion: "Added regression test"
+      weight: 0.10
+      evidence_patterns:
+        - "test.*concurrent"
+        - "#\\[.*test\\]"
+        - "async fn test_"
+
+hints:
+  progressive:
+    - level: 1
+      trigger_condition: "no_progress_minutes >= 30"
+      content: "The issue involves timing between two operations. What happens if two requests arrive at almost the same time?"
+
+    - level: 2
+      trigger_condition: "no_progress_minutes >= 60"
+      content: "Look at how buffer locks are acquired in crates/collab/src/db/buffers.rs. Is the lock acquisition atomic?"
+
+    - level: 3
+      trigger_condition: "no_progress_minutes >= 90"
+      content: "The check_buffer_available() call and try_acquire_lock() call are separate operations. What could happen between them?"
+
+    - level: 4
+      trigger_condition: "no_progress_minutes >= 120"
+      content: "This is a classic TOCTOU (Time-of-check to time-of-use) bug. The fix requires making the check and acquisition atomic, typically using SELECT FOR UPDATE or a single UPDATE with a WHERE clause."
+
+environment:
+  docker:
+    compose_file: "docker-compose.race-001.yaml"
+    services:
+      - name: "collab-server"
+        build:
+          context: "."
+          dockerfile: "Dockerfile.collab"
+          args:
+            FEATURES: "sdlc_inject"
+        ports:
+          - "8080:8080"
+        environment:
+          DATABASE_URL: "postgres://postgres:postgres@postgres:5432/collab"
+          RUST_LOG: "collab=debug"
+        depends_on:
+          - postgres
+
+      - name: "postgres"
+        image: "postgres:15"
+        environment:
+          POSTGRES_PASSWORD: "postgres"
+          POSTGRES_DB: "collab"
+        volumes:
+          - "pgdata:/var/lib/postgresql/data"
+        ports:
+          - "5432:5432"
+
+      - name: "prometheus"
+        image: "prom/prometheus:latest"
+        volumes:
+          - "./prometheus.yml:/etc/prometheus/prometheus.yml"
+        ports:
+          - "9090:9090"
+
+      - name: "grafana"
+        image: "grafana/grafana:latest"
+        volumes:
+          - "./grafana/dashboards:/var/lib/grafana/dashboards"
+        ports:
+          - "3000:3000"
+
+  monitoring:
+    prometheus_config: |
+      global:
+        scrape_interval: 5s
+      scrape_configs:
+        - job_name: 'collab'
+          static_configs:
+            - targets: ['collab-server:8080']
+
+    grafana_dashboard: "dashboards/collab-buffer-health.json"
+
+    key_metrics:
+      - name: "buffer_conflicts_total"
+        query: "rate(buffer_conflicts_total[1m])"
+        alert: "> 0"
+      - name: "buffer_lock_wait_p99"
+        query: "histogram_quantile(0.99, buffer_acquisition_duration_seconds_bucket)"
+        alert: "> 1"
+
+  load_generator:
+    tool: "k6"
+    script: "load-tests/concurrent-buffer-open.js"
+    script_content: |
+      import http from 'k6/http';
+      import { check, group } from 'k6';
+      import { SharedArray } from 'k6/data';
+
+      export const options = {
+        scenarios: {
+          concurrent_open: {
+            executor: 'ramping-vus',
+            startVUs: 0,
+            stages: [
+              { duration: '30s', target: 50 },
+              { duration: '1m', target: 50 },
+              { duration: '30s', target: 0 },
+            ],
+          },
+        },
+      };
+
+      const PROJECT_ID = 'test-project';
+      const FILE_PATH = 'src/main.rs';
+
+      export default function() {
+        group('concurrent_buffer_open', function() {
+          const res = http.post(`http://collab-server:8080/api/projects/${PROJECT_ID}/buffers`,
+            JSON.stringify({ path: FILE_PATH }),
+            { headers: { 'Content-Type': 'application/json' } }
+          );
+
+          check(res, {
+            'status is 200 or 409': (r) => r.status === 200 || r.status === 409,
+            'no server error': (r) => r.status < 500,
+          });
+        });
+      }
+
+related_patterns:
+  - id: "RACE-002"
+    relationship: "similar"
+    description: "Same check-then-act pattern but in ID generation"
+  - id: "COORD-007"
+    relationship: "compound"
+    description: "Delete + edit race can compound with this"
+  - id: "SPLIT-003"
+    relationship: "exacerbates"
+    description: "Network partition makes this race more likely"
+
+related_incidents:
+  - url: "https://ayende.com/blog/186273-C/production-postmortem-this-data-corruption-bug-requires-3-simultaneous-race-conditions"
+    title: "RavenDB data corruption from concurrent races"
+    relevance: "Similar check-then-act pattern in production database"
+
+  - url: "https://github.com/danluu/post-mortems#conflicts"
+    title: "Dan Luu's postmortem collection - conflicts section"
+    relevance: "Multiple examples of race conditions in production"
+
+  - url: "https://blog.mads-hartmann.com/sre/2021/05/14/thundering-herd.html"
+    title: "Thundering herds and race conditions"
+    relevance: "How races can cascade into larger failures"
+
+tags:
+  - "race-condition"
+  - "check-then-act"
+  - "TOCTOU"
+  - "distributed-locking"
+  - "database"
+  - "collaboration"
+  - "real-time"

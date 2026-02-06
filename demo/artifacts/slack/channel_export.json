@@ -1,0 +1,138 @@
+{
+  "channel": {
+    "id": "CA75B85E9",
+    "name": "incident-race-001-539",
+    "purpose": "Incident channel for Check-then-act buffer ownership race",
+    "created": "2026-02-05T18:08:25.395561Z",
+    "topic": "Status: INVESTIGATING | Severity: SEV-2 | IC: @oncall-engineer",
+    "num_members": 20
+  },
+  "messages": [
+    {
+      "ts": "1770343705.395561",
+      "user": "incident-bot",
+      "text": "\ud83d\udea8 *INCIDENT DETECTED*\n\n*Service:* zed\n*Severity:* SEV-2\n*Alert:* Check-then-act buffer ownership race\n\n*Symptoms Reported:*\n  - Edits appear then disappear\n  - Cursor jumps unexpectedly to other user's position\n  - Undo doesn't restore expected state\n\n*Affected Users:* ~266 users\n*Error Rate:* 2.6% (baseline: 0.1%)\n\n<@oncall-engineer> has been paged.\n",
+      "type": "message",
+      "reactions": []
+    },
+    {
+      "ts": "1770344005.395561",
+      "user": "oncall-engineer",
+      "text": "Acknowledged. Looking into this now.",
+      "type": "message",
+      "reactions": [
+        {
+          "name": "eyes",
+          "count": 5
+        }
+      ]
+    },
+    {
+      "ts": "1770344305.395561",
+      "user": "oncall-engineer",
+      "text": "Starting investigation. Here's what I see so far:\n\n1. \u2705 Service is up and responding\n2. \u26a0\ufe0f Error rate elevated for `/api/buffers/acquire` endpoint\n3. \u26a0\ufe0f Latency p99 increased from 50ms to 2000ms\n4. \ud83d\udd0d Checking logs and metrics now...\n\nDashboard: <https://grafana.internal/d/race-001|RACE-001 Dashboard>\n",
+      "type": "message",
+      "reactions": []
+    },
+    {
+      "ts": "1770344905.395561",
+      "user": "senior-engineer",
+      "text": "I've seen this before. Check the buffer locking code.",
+      "type": "message",
+      "reactions": []
+    },
+    {
+      "ts": "1770345505.395561",
+      "user": "oncall-engineer",
+      "text": "\ud83d\udcca *Metrics Analysis*\n\nFound some anomalies:\n  - `buffer_conflicts_total`: elevated\n  - `buffer_lock_retries_total`: elevated\n  - `buffer_acquisition_duration_seconds`: bimodal distribution indicates race\n\n  - Request queue depth: growing unbounded\n  - Successful lock acquisitions: trending down\n\nThis looks like resource contention, not a service outage.\n",
+      "type": "message",
+      "reactions": []
+    },
+    {
+      "ts": "1770346105.395561",
+      "user": "oncall-engineer",
+      "text": "\ud83d\udcdd *Log Analysis*\n\nFound these patterns in the last hour:\n```WARN.*buffer ownership conflict detected```\n```ERROR.*multiple owners for buffer_id=\\d+```\n```DEBUG.*lock acquisition failed after availability check passed```\n\n\nFrequency: 898 occurrences in last 30 min\n\nThe errors correlate with the latency spike.\n",
+      "type": "message",
+      "reactions": []
+    },
+    {
+      "ts": "1770347305.395561",
+      "user": "senior-engineer",
+      "text": "I think I know what this is.\n\nCheck the lock acquisition flow - there might be a timing issue.\n\nHint: check_buffer_available() and try_acquire_lock() are separate operations\n",
+      "type": "message",
+      "reactions": []
+    },
+    {
+      "ts": "1770348205.395561",
+      "user": "oncall-engineer",
+      "text": "\ud83c\udfaf *Root Cause Identified*\n\nFound it! In `crates/collab/src/db/buffers.rs`:\n\nThe issue is a TOCTOU (Time-of-check to time-of-use) race condition:\n1. We check if buffer is available (separate query)\n2. Then we try to acquire the lock (another query)\n3. Between steps 1 and 2, another request can acquire the lock\n\nUnder high concurrency, this causes conflicts.\n\n*NOT the fix:* Assumes network latency is the root cause\n*Actual fix:* Make the check-and-acquire atomic (single transaction)\n",
+      "type": "message",
+      "reactions": [
+        {
+          "name": "white_check_mark",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "ts": "1770349105.395561",
+      "user": "tech-lead",
+      "text": "Good find. Let's get a fix in.",
+      "type": "message",
+      "reactions": []
+    },
+    {
+      "ts": "1770350005.395561",
+      "user": "oncall-engineer",
+      "text": "\ud83d\udd27 *Fix In Progress*\n\nPR opened: <https://github.com/org/repo/pull/6626|Fix buffer lock race condition>\n\nApproach:\n- Replace check-then-acquire with atomic operation\n- Add concurrent test to prevent regression\n\n```rust\n// Use SELECT FOR UPDATE or atomic UPDATE\nlet lock_acquired = sqlx::query!(\n    \"UPDATE buffers SET locked_by = $1\n     WHERE id = $2 AND locked_by IS NULL\n     RETURNING id\",\n...\n```\n\nRunning tests now...\n",
+      "type": "message",
+      "reactions": []
+    },
+    {
+      "ts": "1770350605.395561",
+      "user": "oncall-engineer",
+      "text": "\u2705 *Fix Deployed*\n\n- PR merged and deployed to production\n- Canary looks good (0 conflicts in last 5 min)\n- Error rate back to baseline\n- Monitoring for 15 more minutes before resolving\n\nMetrics: <https://grafana.internal/d/race-001|Dashboard>\n",
+      "type": "message",
+      "reactions": []
+    },
+    {
+      "ts": "1770350905.395561",
+      "user": "incident-bot",
+      "text": "\ud83c\udf89 *INCIDENT RESOLVED*\n\n*Duration:* 2 hours 0 minutes\n*Root Cause:* Race condition in buffer lock acquisition\n*Resolution:* Made lock acquisition atomic\n*Impact:* ~1746 users affected\n\n*Action Items:*\n- [ ] Schedule post-mortem\n- [ ] Add alerting for `buffer_conflicts_total`\n- [ ] Review other lock acquisition code for similar issues\n\nChannel will be archived in 7 days.\n",
+      "type": "message",
+      "reactions": []
+    }
+  ],
+  "threads": [
+    {
+      "parent_ts": "1770344905.395561",
+      "replies": [
+        {
+          "ts": "1770345025.395561",
+          "user": "oncall-engineer",
+          "text": "Which file should I look at specifically?"
+        },
+        {
+          "ts": "1770345205.395561",
+          "user": "senior-engineer",
+          "text": "Start with `crates/collab/src/db/buffers.rs` - the lock acquisition logic"
+        }
+      ]
+    },
+    {
+      "parent_ts": "1770348205.395561",
+      "replies": [
+        {
+          "ts": "1770348325.395561",
+          "user": "tech-lead",
+          "text": "Can you explain more? What's the race window?"
+        },
+        {
+          "ts": "1770348505.395561",
+          "user": "oncall-engineer",
+          "text": "Here's the timeline of a race:\n\n```\nT0: Request A checks availability \u2192 buffer is free\nT1: Request B checks availability \u2192 buffer is free\nT2: Request A acquires lock \u2192 success\nT3: Request B acquires lock \u2192 CONFLICT (A already has it)\n```\n\nThe window between T0-T2 is the race window. Under load, this happens frequently.\n\nFix: Use `SELECT ... FOR UPDATE` or atomic `UPDATE ... WHERE ... RETURNING` to make the check-and-acquire a single atomic operation.\n"
+        }
+      ]
+    }
+  ]
+}

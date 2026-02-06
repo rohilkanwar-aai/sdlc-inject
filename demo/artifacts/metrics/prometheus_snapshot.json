@@ -1,0 +1,126 @@
+{
+  "status": "success",
+  "data": {
+    "resultType": "vector",
+    "result": [
+      {
+        "metric": {
+          "__name__": "http_requests_total",
+          "method": "POST",
+          "path": "/api/buffers/acquire",
+          "status": "200",
+          "service": "zed"
+        },
+        "value": [
+          1770350905.397386,
+          "27301"
+        ]
+      },
+      {
+        "metric": {
+          "__name__": "http_requests_total",
+          "method": "POST",
+          "path": "/api/buffers/acquire",
+          "status": "500",
+          "service": "zed"
+        },
+        "value": [
+          1770350905.397386,
+          "1615"
+        ]
+      },
+      {
+        "metric": {
+          "__name__": "http_request_duration_seconds",
+          "quantile": "0.99",
+          "path": "/api/buffers/acquire"
+        },
+        "value": [
+          1770350905.397386,
+          "2.6747968599805234"
+        ]
+      },
+      {
+        "metric": {
+          "__name__": "http_request_duration_seconds",
+          "quantile": "0.50",
+          "path": "/api/buffers/acquire"
+        },
+        "value": [
+          1770350905.397386,
+          "0.17096786119350274"
+        ]
+      },
+      {
+        "metric": {
+          "__name__": "buffer_conflicts_total",
+          "service": "zed"
+        },
+        "value": [
+          1770350905.397386,
+          "500"
+        ]
+      },
+      {
+        "metric": {
+          "__name__": "buffer_lock_retries_total",
+          "service": "zed"
+        },
+        "value": [
+          1770350905.397386,
+          "820"
+        ]
+      },
+      {
+        "metric": {
+          "__name__": "buffer_acquisition_duration_seconds",
+          "service": "zed"
+        },
+        "value": [
+          1770350905.397386,
+          "1.5725675676371367"
+        ]
+      },
+      {
+        "metric": {
+          "__name__": "db_pool_connections_active",
+          "pool": "main"
+        },
+        "value": [
+          1770350905.397386,
+          "45"
+        ]
+      },
+      {
+        "metric": {
+          "__name__": "db_pool_connections_max",
+          "pool": "main"
+        },
+        "value": [
+          1770350905.397386,
+          "50"
+        ]
+      },
+      {
+        "metric": {
+          "__name__": "process_cpu_seconds_total",
+          "instance": "collab-1"
+        },
+        "value": [
+          1770350905.397386,
+          "45347"
+        ]
+      },
+      {
+        "metric": {
+          "__name__": "process_resident_memory_bytes",
+          "instance": "collab-1"
+        },
+        "value": [
+          1770350905.397386,
+          "1684465854"
+        ]
+      }
+    ]
+  }
+}

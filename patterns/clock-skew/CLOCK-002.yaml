@@ -1,0 +1,211 @@
+id: CLOCK-002
+version: "1.0"
+name: "Trace span parent-child timing impossibility"
+category: "Distributed System Failures"
+subcategory: "Clock Skew & Time Issues"
+
+sdlc_phases:
+  primary: "Debugging"
+  secondary: ["Maintenance", "Verification"]
+
+description: |
+  Distributed tracing spans show impossible timing relationships where child
+  spans appear to start before their parent spans, or have negative durations.
+  This occurs because different services use their local system clocks without
+  accounting for clock skew between machines.
+
+target_codebase:
+  name: "zed"
+  min_version: "0.120.0"
+  language: "rust"
+
+injection:
+  files:
+    - path: "crates/telemetry/src/tracing.rs"
+      patches:
+        - type: "replace"
+          old: "fn start_span(&mut self, name: &str, parent: Option<SpanId>) -> Span {"
+          new: |
+            fn start_span(&mut self, name: &str, parent: Option<SpanId>) -> Span {
+                // Bug: Uses local system time without any skew compensation
+                let start_time = SystemTime::now();
+                // Missing: let start_time = self.synchronized_clock.now();
+
+                Span {
+                    id: SpanId::new(),
+                    name: name.to_string(),
+                    parent_id: parent,
+                    start_time,  // Local clock, may be skewed
+                    end_time: None,
+                    attributes: HashMap::new(),
+                }
+
+        - type: "replace"
+          old: "fn end_span(&mut self, span_id: SpanId) {"
+          new: |
+            fn end_span(&mut self, span_id: SpanId) {
+                if let Some(span) = self.active_spans.get_mut(&span_id) {
+                    span.end_time = Some(SystemTime::now());
+                    // Bug: No validation that end_time > start_time
+                    // Clock adjustments can make this negative
+                }
+
+    - path: "crates/collab/src/rpc/traced.rs"
+      patches:
+        - type: "replace"
+          old: "async fn traced_call<T>(&self, request: T) -> Result<T::Response> {"
+          new: |
+            async fn traced_call<T>(&self, request: T) -> Result<T::Response> {
+                // Pass span context to remote service
+                let span = tracing::start_span("rpc_call", Some(self.current_span()));
+                let response = self.inner.call(request).await;
+                tracing::end_span(span.id);
+
+                // Bug: Remote service uses its own clock
+                // Child span on remote may have start_time < parent start_time
+                response
+
+trigger:
+  conditions:
+    - "Clock skew > 10ms between services"
+    - "NTP adjustment during request processing"
+    - "Cross-service RPC calls"
+
+  reproduction_steps:
+    - step: 1
+      action: "Set service B's clock 100ms behind service A"
+      command: "sudo date -s '100 milliseconds ago'"
+    - step: 2
+      action: "Make RPC from A to B"
+    - step: 3
+      action: "Export and visualize trace"
+    - step: 4
+      action: "Observe child span starts 'before' parent"
+
+observable_symptoms:
+  user_visible:
+    - symptom: "Trace waterfall shows overlapping/impossible spans"
+    - symptom: "Jaeger/Zipkin displays negative durations"
+    - symptom: "Can't correlate cause and effect in traces"
+
+  log_messages:
+    - pattern: "WARN.*span duration negative"
+      level: "warn"
+    - pattern: "DEBUG.*child span start.*parent start"
+      level: "debug"
+
+  metrics:
+    - name: "span_duration_seconds"
+      type: "histogram"
+      anomaly: "Negative values or NaN"
+
+difficulty:
+  estimated_human_time_hours: 2
+  frontier_model_pass_rate_percent: 40
+
+failure_modes:
+  common:
+    - mode: "Blame tracing library"
+      description: "Assumes bug in Jaeger/Zipkin"
+    - mode: "Add arbitrary offset"
+      description: "Hardcoded adjustment doesn't handle varying skew"
+
+golden_path:
+  steps:
+    - step: 1
+      action: "Reproduce with intentional clock skew"
+      tools: ["date", "chrony"]
+
+    - step: 2
+      action: "Check clock sources in tracing code"
+      search_queries:
+        - "SystemTime::now()"
+        - "Instant::now()"
+
+    - step: 3
+      action: "Identify use of wall clock for distributed timestamps"
+      key_insight: "Wall clock time is not monotonic across machines"
+
+    - step: 4
+      action: "Implement clock skew compensation"
+      solutions:
+        preferred: |
+          // Use Hybrid Logical Clock for distributed timestamps
+          struct HybridLogicalClock {
+              physical: SystemTime,
+              logical: u64,
+          }
+
+          impl HybridLogicalClock {
+              fn now(&mut self) -> HLCTimestamp {
+                  let physical = SystemTime::now();
+                  if physical <= self.physical {
+                      self.logical += 1;
+                  } else {
+                      self.physical = physical;
+                      self.logical = 0;
+                  }
+                  HLCTimestamp {
+                      physical: self.physical,
+                      logical: self.logical,
+                  }
+              }
+
+              fn receive(&mut self, remote: HLCTimestamp) -> HLCTimestamp {
+                  let local = SystemTime::now();
+                  self.physical = max(local, max(self.physical, remote.physical));
+                  if self.physical == remote.physical {
+                      self.logical = max(self.logical, remote.logical) + 1;
+                  } else {
+                      self.logical = 0;
+                  }
+                  self.now()
+              }
+          }
+
+        alternative: |
+          // Simpler: Record both wall time and monotonic offset
+          fn start_span(&mut self, name: &str, parent: Option<SpanContext>) -> Span {
+              let wall_time = SystemTime::now();
+              let mono_offset = Instant::now() - self.process_start;
+
+              Span {
+                  wall_time,
+                  mono_offset,
+                  parent_mono_offset: parent.map(|p| p.mono_offset),
+                  ..
+              }
+          }
+
+grading:
+  outcome_based:
+    - criterion: "No negative span durations"
+      weight: 0.30
+      verification:
+        type: "automated"
+        command: "cargo test trace_timing"
+
+    - criterion: "Child spans always after parent start"
+      weight: 0.30
+
+    - criterion: "Traces usable for debugging"
+      weight: 0.15
+
+  process_based:
+    - criterion: "Identified clock skew as root cause"
+      weight: 0.15
+    - criterion: "Understood HLC or similar solution"
+      weight: 0.10
+
+hints:
+  progressive:
+    - level: 1
+      content: "How do you get consistent timestamps across different machines?"
+    - level: 2
+      content: "SystemTime::now() returns each machine's local clock."
+
+tags:
+  - "clock-skew"
+  - "distributed-tracing"
+  - "observability"
+  - "hybrid-logical-clock"

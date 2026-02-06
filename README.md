@@ -83,9 +83,24 @@ The analyzer scans for:
 
 The neural analyzer uses Claude to perform deep semantic analysis of code, understanding logic and data flow rather than relying on regex patterns.
 
+**Supports both local paths and GitHub URLs:**
+
 ```bash
-# Perform neural analysis on a codebase
+# Analyze a local codebase
 sdlc-inject neural-analyze ./path/to/codebase
+
+# Analyze a GitHub repository directly
+sdlc-inject neural-analyze https://github.com/zed-industries/zed
+
+# Analyze a specific branch or tag
+sdlc-inject neural-analyze https://github.com/owner/repo --ref v1.0.0
+sdlc-inject neural-analyze https://github.com/owner/repo --ref feature-branch
+
+# Full clone (not shallow) for complete history
+sdlc-inject neural-analyze https://github.com/owner/repo --full
+
+# Keep the cloned repo after analysis
+sdlc-inject neural-analyze https://github.com/owner/repo --keep-clone
 
 # Save detailed report to JSON
 sdlc-inject neural-analyze ./path/to/codebase --output neural-report.json
@@ -349,6 +364,16 @@ sdlc-inject validate-catalog
 # Generate demo artifacts
 sdlc-inject artifacts RACE-001 --output ./demo/artifacts
 ```
+
+## Research & Pattern Taxonomy
+
+For comprehensive documentation of the failure pattern taxonomy, research sources, and real-world incidents, see:
+
+**[docs/RESEARCH.md](docs/RESEARCH.md)** - Full pattern taxonomy with 1000+ failure patterns including:
+- Detailed pattern descriptions and trigger conditions
+- Real-world incident references with postmortem links
+- Academic research citations
+- Implementation methodology and obfuscation strategies
 
 ## Related Work
 

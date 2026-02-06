@@ -645,6 +645,46 @@ def enrich_all(ctx: click.Context, category: str | None, dry_run: bool, max_inci
         updater.close()
 
 
+def _is_github_url(path: str) -> bool:
+    """Check if the path is a GitHub URL."""
+    return path.startswith(("https://github.com/", "git@github.com:", "github.com/"))
+
+
+def _clone_github_repo(url: str, ref: str | None = None, shallow: bool = True) -> Path:
+    """Clone a GitHub repo to a temporary directory."""
+    import subprocess
+    import tempfile
+
+    # Normalize URL
+    if url.startswith("github.com/"):
+        url = f"https://{url}"
+
+    # Remove trailing .git if present
+    if url.endswith(".git"):
+        url = url[:-4]
+
+    # Create temp directory
+    temp_dir = Path(tempfile.mkdtemp(prefix="sdlc-inject-"))
+
+    # Build clone command
+    clone_cmd = ["git", "clone"]
+    if shallow:
+        clone_cmd.extend(["--depth", "1"])
+    if ref:
+        clone_cmd.extend(["--branch", ref])
+    clone_cmd.extend([url, str(temp_dir)])
+
+    try:
+        subprocess.run(clone_cmd, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as e:
+        # Clean up on failure
+        import shutil
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise click.ClickException(f"Failed to clone repository: {e.stderr}")
+
+    return temp_dir
+
+
 @main.command("neural-analyze")
 @click.argument("codebase_path")
 @click.option("-o", "--output", help="Output file for analysis report (JSON)")
@@ -652,6 +692,9 @@ def enrich_all(ctx: click.Context, category: str | None, dry_run: bool, max_inci
 @click.option("--max-files", default=20, help="Maximum files to analyze")
 @click.option("--focus", multiple=True, help="Focus on specific patterns (race, coordination, timing)")
 @click.option("--enrich/--no-enrich", default=True, help="Enrich with Exa search for similar vulnerabilities")
+@click.option("--ref", help="Git branch, tag, or commit to checkout (for GitHub URLs)")
+@click.option("--shallow/--full", default=True, help="Shallow clone for faster downloads (for GitHub URLs)")
+@click.option("--keep-clone", is_flag=True, help="Keep cloned repo after analysis (for GitHub URLs)")
 @click.pass_context
 def neural_analyze(
     ctx: click.Context,
@@ -661,12 +704,19 @@ def neural_analyze(
     max_files: int,
     focus: tuple,
     enrich: bool,
+    ref: str | None,
+    shallow: bool,
+    keep_clone: bool,
 ) -> None:
     """Perform deep neural analysis of a codebase using Claude.
 
     Unlike the basic 'analyze' command which uses regex patterns, neural-analyze
     uses Claude to semantically understand code and identify vulnerability
     injection points based on actual code logic.
+
+    Supports both local paths and GitHub URLs:
+    - Local: ./my-project or /path/to/project
+    - GitHub: https://github.com/owner/repo
 
     This provides:
     - Semantic understanding of code flow and data dependencies
@@ -676,11 +726,13 @@ def neural_analyze(
 
     Examples:
         sdlc-inject neural-analyze ./my-project
-        sdlc-inject neural-analyze ./my-project --output report.json
+        sdlc-inject neural-analyze https://github.com/zed-industries/zed
+        sdlc-inject neural-analyze https://github.com/owner/repo --ref v1.0.0
+        sdlc-inject neural-analyze https://github.com/owner/repo --full --keep-clone
         sdlc-inject neural-analyze ./my-project --focus race --focus coordination
-        sdlc-inject neural-analyze ./my-project --no-enrich
     """
     import os
+    import shutil
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
@@ -691,6 +743,22 @@ def neural_analyze(
     if enrich and not exa_key:
         console.print("[yellow]Warning: EXA_API_KEY not set, enrichment disabled[/yellow]")
         enrich = False
+
+    # Handle GitHub URLs
+    temp_dir: Path | None = None
+    analysis_path: str = codebase_path
+
+    if _is_github_url(codebase_path):
+        console.print(f"[bold]Cloning GitHub repository: {codebase_path}[/bold]")
+        if ref:
+            console.print(f"  Branch/tag: {ref}")
+        console.print(f"  Shallow clone: {'yes' if shallow else 'no'}\n")
+
+        with console.status("[bold blue]Cloning repository...[/bold blue]"):
+            temp_dir = _clone_github_repo(codebase_path, ref=ref, shallow=shallow)
+            analysis_path = str(temp_dir)
+
+        console.print(f"[green]Repository cloned to: {temp_dir}[/green]\n")
 
     console.print(f"[bold]Neural Analysis of {codebase_path}[/bold]\n")
     console.print(f"Model: {model}")
@@ -708,7 +776,7 @@ def neural_analyze(
     try:
         with console.status("[bold green]Analyzing codebase with Claude...[/bold green]"):
             result = analyzer.analyze_codebase(
-                codebase_path=codebase_path,
+                codebase_path=analysis_path,
                 max_files=max_files,
                 focus_patterns=list(focus) if focus else None,
                 output_file=output,
@@ -787,6 +855,13 @@ def neural_analyze(
 
     finally:
         analyzer.close()
+
+        # Clean up cloned repo if applicable
+        if temp_dir and not keep_clone:
+            console.print(f"\n[dim]Cleaning up cloned repository...[/dim]")
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        elif temp_dir and keep_clone:
+            console.print(f"\n[green]Cloned repository kept at: {temp_dir}[/green]")
 
 
 if __name__ == "__main__":

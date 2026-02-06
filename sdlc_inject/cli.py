@@ -864,5 +864,181 @@ def neural_analyze(
             console.print(f"\n[green]Cloned repository kept at: {temp_dir}[/green]")
 
 
+@main.command("evaluate")
+@click.argument("pattern_id")
+@click.option("-t", "--target", required=True, help="Target codebase with injected pattern")
+@click.option("-o", "--output", required=True, help="Output directory for results")
+@click.option("-n", "--num-agents", default=10, help="Number of parallel agents")
+@click.option("-m", "--model", default="claude-sonnet-4-20250514", help="Claude model to use")
+@click.option("--temperatures", default="0.0", help="Comma-separated temperature values")
+@click.option("--timeout", default=3600, help="Max time per agent in seconds")
+@click.option("--artifacts", help="Path to debugging artifacts")
+@click.pass_context
+def evaluate(
+    ctx: click.Context,
+    pattern_id: str,
+    target: str,
+    output: str,
+    num_agents: int,
+    model: str,
+    temperatures: str,
+    timeout: int,
+    artifacts: str | None,
+) -> None:
+    """Run parallel agent evaluation on an injected codebase.
+
+    Spins up N agents to debug the same injected pattern, collects trajectories,
+    and analyzes success/failure patterns.
+
+    Examples:
+        sdlc-inject evaluate RACE-001 --target ./injected-codebase --output ./results -n 10
+        sdlc-inject evaluate RACE-001 --target ./injected --output ./results --temperatures 0.0,0.3,0.7
+    """
+    import asyncio
+
+    from .harness import EvaluationConfig, Orchestrator
+
+    target_path = Path(target)
+    if not target_path.exists():
+        console.print(f"[red]Target codebase not found: {target}[/red]")
+        raise SystemExit(1)
+
+    # Parse temperatures
+    temp_list = [float(t.strip()) for t in temperatures.split(",")]
+
+    config = EvaluationConfig(
+        pattern_id=pattern_id,
+        target_codebase=target_path,
+        artifacts_dir=Path(artifacts) if artifacts else None,
+        num_agents=num_agents,
+        max_time_per_agent=timeout,
+        model=model,
+        temperatures=temp_list,
+    )
+
+    console.print(f"[bold]Running Evaluation: {pattern_id}[/bold]\n")
+    console.print(f"Target: {target}")
+    console.print(f"Agents: {num_agents}")
+    console.print(f"Model: {model}")
+    console.print(f"Temperatures: {temp_list}")
+    console.print(f"Timeout: {timeout}s per agent\n")
+
+    try:
+        orchestrator = Orchestrator()
+
+        with console.status(f"[bold green]Running {num_agents} parallel agents...[/bold green]"):
+            run = asyncio.run(orchestrator.run_evaluation(config, Path(output)))
+
+        # Display results
+        console.print(f"\n[bold]Evaluation Complete[/bold]\n")
+        console.print(f"Run ID: {run.run_id}")
+        console.print(f"Duration: {(run.end_time - run.start_time).total_seconds():.1f}s")
+        console.print(f"Trajectories collected: {len(run.trajectories)}")
+        console.print(f"Errors: {len(run.errors)}")
+
+        if run.analytics:
+            console.print(f"\n[bold]Results Summary[/bold]\n")
+
+            table = Table()
+            table.add_column("Metric", style="cyan")
+            table.add_column("Value", justify="right")
+
+            pr = run.analytics.pass_rate
+            pr_color = "green" if pr >= 0.3 else "yellow" if pr >= 0.1 else "red"
+
+            table.add_row("Pass Rate", f"[{pr_color}]{pr*100:.1f}%[/{pr_color}]")
+            table.add_row("95% CI", f"{run.analytics.pass_rate_ci_lower*100:.1f}% - {run.analytics.pass_rate_ci_upper*100:.1f}%")
+            table.add_row("Root Cause Identified", f"{run.analytics.root_cause_identified_rate*100:.1f}%")
+            table.add_row("Median Time (Success)", f"{run.analytics.median_time_success/60:.1f} min")
+            table.add_row("Median Time (Failure)", f"{run.analytics.median_time_failure/60:.1f} min")
+
+            console.print(table)
+
+            if run.analytics.failure_modes:
+                console.print(f"\n[bold]Failure Modes[/bold]\n")
+                for fm in run.analytics.failure_modes[:5]:
+                    console.print(f"  • {fm.mode.value}: {fm.count} ({fm.frequency*100:.1f}%)")
+
+        console.print(f"\n[green]Results saved to {output}[/green]")
+
+    except Exception as e:
+        console.print(f"[red]Error during evaluation: {e}[/red]")
+        raise SystemExit(1)
+
+
+@main.command("analyze-trajectories")
+@click.argument("trajectories_path")
+@click.option("-p", "--pattern-id", required=True, help="Pattern ID")
+@click.option("-o", "--output", help="Output file for analytics (JSON or MD)")
+@click.option("-f", "--format", "fmt", default="table", help="Output format (table, json, markdown)")
+@click.pass_context
+def analyze_trajectories_cmd(
+    ctx: click.Context,
+    trajectories_path: str,
+    pattern_id: str,
+    output: str | None,
+    fmt: str,
+) -> None:
+    """Analyze collected agent trajectories.
+
+    Load trajectories from a directory or file and compute analytics
+    including pass rate, failure modes, and process metrics.
+
+    Examples:
+        sdlc-inject analyze-trajectories ./results/trajectories -p RACE-001
+        sdlc-inject analyze-trajectories ./results/trajectories -p RACE-001 --output report.md
+    """
+    from .harness import load_trajectories, AnalyticsPipeline
+
+    traj_path = Path(trajectories_path)
+    if not traj_path.exists():
+        console.print(f"[red]Trajectories path not found: {trajectories_path}[/red]")
+        raise SystemExit(1)
+
+    console.print(f"[bold]Analyzing Trajectories[/bold]\n")
+
+    trajectories = load_trajectories(traj_path)
+    console.print(f"Loaded {len(trajectories)} trajectories")
+
+    pipeline = AnalyticsPipeline()
+    result = pipeline.analyze(trajectories, pattern_id, "manual-analysis")
+
+    if fmt == "json":
+        console.print(result.to_json())
+    elif fmt == "markdown":
+        console.print(result.to_markdown())
+    else:
+        # Table format
+        table = Table(title=f"Analytics: {pattern_id}")
+        table.add_column("Metric", style="cyan")
+        table.add_column("Value", justify="right")
+
+        table.add_row("Trajectories", str(result.num_trajectories))
+        table.add_row("Pass Rate", f"{result.pass_rate*100:.1f}%")
+        table.add_row("95% CI", f"{result.pass_rate_ci_lower*100:.1f}% - {result.pass_rate_ci_upper*100:.1f}%")
+        table.add_row("Partial Rate", f"{result.partial_rate*100:.1f}%")
+        table.add_row("Root Cause ID Rate", f"{result.root_cause_identified_rate*100:.1f}%")
+        table.add_row("Median Time (Success)", f"{result.median_time_success/60:.1f} min")
+        table.add_row("Median Time (Failure)", f"{result.median_time_failure/60:.1f} min")
+
+        console.print(table)
+
+        if result.failure_modes:
+            console.print(f"\n[bold]Failure Modes:[/bold]")
+            for fm in result.failure_modes:
+                console.print(f"  • {fm.mode.value}: {fm.count} ({fm.frequency*100:.1f}%)")
+
+    if output:
+        output_path = Path(output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if output_path.suffix == ".md":
+            with open(output_path, "w") as f:
+                f.write(result.to_markdown())
+        else:
+            with open(output_path, "w") as f:
+                f.write(result.to_json())
+        console.print(f"\n[green]Analytics saved to {output}[/green]")
+
+
 if __name__ == "__main__":
     main()

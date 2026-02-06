@@ -365,6 +365,32 @@ sdlc-inject validate-catalog
 sdlc-inject artifacts RACE-001 --output ./demo/artifacts
 ```
 
+### Evaluation Harness (Parallel Agent Testing)
+
+Run multiple Claude agents in parallel to calibrate pattern difficulty and analyze success/failure modes.
+
+```bash
+# Run 10 parallel agents against an injected codebase
+sdlc-inject evaluate RACE-001 --target ./injected-codebase --output ./results -n 10
+
+# With temperature variations for diversity
+sdlc-inject evaluate RACE-001 --target ./injected --output ./results --temperatures 0.0,0.3,0.7
+
+# Analyze collected trajectories
+sdlc-inject analyze-trajectories ./results/trajectories -p RACE-001
+
+# Generate markdown report
+sdlc-inject analyze-trajectories ./results/trajectories -p RACE-001 --output report.md
+```
+
+Evaluation outputs:
+- **Pass rate** with 95% confidence interval
+- **Failure mode clustering** (symptom chasing, wrong layer, partial fix, etc.)
+- **Time distribution** for success vs failure
+- **Tool usage patterns** and successful sequences
+
+See [docs/EVALUATION_HARNESS.md](docs/EVALUATION_HARNESS.md) for architecture details.
+
 ## Research & Pattern Taxonomy
 
 For comprehensive documentation of the failure pattern taxonomy, research sources, and real-world incidents, see:

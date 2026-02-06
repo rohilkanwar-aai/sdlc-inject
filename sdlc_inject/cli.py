@@ -13,7 +13,7 @@ from .injection import inject_pattern
 from .grading import generate_grading_setup, evaluate_trajectory
 from .environment import generate_environment
 from .artifacts import generate_artifacts_for_pattern
-from .analyzer import CodebaseAnalyzer
+from .analyzer import CodebaseAnalyzer, NeuralCodeAnalyzer
 from .enricher import PatternUpdater
 
 console = Console()
@@ -643,6 +643,150 @@ def enrich_all(ctx: click.Context, category: str | None, dry_run: bool, max_inci
 
     finally:
         updater.close()
+
+
+@main.command("neural-analyze")
+@click.argument("codebase_path")
+@click.option("-o", "--output", help="Output file for analysis report (JSON)")
+@click.option("-m", "--model", default="claude-sonnet-4-20250514", help="Claude model to use")
+@click.option("--max-files", default=20, help="Maximum files to analyze")
+@click.option("--focus", multiple=True, help="Focus on specific patterns (race, coordination, timing)")
+@click.option("--enrich/--no-enrich", default=True, help="Enrich with Exa search for similar vulnerabilities")
+@click.pass_context
+def neural_analyze(
+    ctx: click.Context,
+    codebase_path: str,
+    output: str | None,
+    model: str,
+    max_files: int,
+    focus: tuple,
+    enrich: bool,
+) -> None:
+    """Perform deep neural analysis of a codebase using Claude.
+
+    Unlike the basic 'analyze' command which uses regex patterns, neural-analyze
+    uses Claude to semantically understand code and identify vulnerability
+    injection points based on actual code logic.
+
+    This provides:
+    - Semantic understanding of code flow and data dependencies
+    - Identification of race conditions, state corruption, resource leaks
+    - Suggested injection points with explanations
+    - Optional enrichment via Exa API for similar vulnerabilities
+
+    Examples:
+        sdlc-inject neural-analyze ./my-project
+        sdlc-inject neural-analyze ./my-project --output report.json
+        sdlc-inject neural-analyze ./my-project --focus race --focus coordination
+        sdlc-inject neural-analyze ./my-project --no-enrich
+    """
+    import os
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        console.print("[red]Error: ANTHROPIC_API_KEY environment variable required for neural analysis[/red]")
+        raise SystemExit(1)
+
+    exa_key = os.environ.get("EXA_API_KEY")
+    if enrich and not exa_key:
+        console.print("[yellow]Warning: EXA_API_KEY not set, enrichment disabled[/yellow]")
+        enrich = False
+
+    console.print(f"[bold]Neural Analysis of {codebase_path}[/bold]\n")
+    console.print(f"Model: {model}")
+    console.print(f"Max files: {max_files}")
+    if focus:
+        console.print(f"Focus patterns: {', '.join(focus)}")
+    console.print(f"Exa enrichment: {'enabled' if enrich else 'disabled'}\n")
+
+    analyzer = NeuralCodeAnalyzer(
+        api_key=api_key,
+        model=model,
+        exa_api_key=exa_key if enrich else None,
+    )
+
+    try:
+        with console.status("[bold green]Analyzing codebase with Claude...[/bold green]"):
+            result = analyzer.analyze_codebase(
+                codebase_path=codebase_path,
+                max_files=max_files,
+                focus_patterns=list(focus) if focus else None,
+                output_file=output,
+            )
+
+        # Optionally enrich with Exa
+        if enrich and exa_key:
+            with console.status("[bold blue]Enriching with similar vulnerabilities...[/bold blue]"):
+                result = analyzer.enrich_with_similar_code(
+                    result,
+                    search_similar=True,
+                    search_incidents=True,
+                )
+
+        # Display results
+        console.print("\n[bold]Analysis Results[/bold]\n")
+        console.print(f"Files analyzed: {result.files_analyzed}")
+        console.print(f"Tokens used: {result.total_tokens_used:,}")
+        console.print(f"Vulnerabilities found: {len(result.vulnerability_points)}")
+
+        console.print(f"\n[bold]Architecture Summary:[/bold]")
+        console.print(result.architecture_summary or "Not available")
+
+        console.print(f"\n[bold]Concurrency Model:[/bold]")
+        console.print(result.concurrency_model or "Not detected")
+
+        # Display vulnerabilities
+        if result.vulnerability_points:
+            console.print(f"\n[bold]Vulnerability Points ({len(result.vulnerability_points)}):[/bold]\n")
+
+            table = Table()
+            table.add_column("File", style="cyan", max_width=30)
+            table.add_column("Lines", justify="right")
+            table.add_column("Type", style="yellow")
+            table.add_column("Confidence", justify="right")
+            table.add_column("Explanation", max_width=40)
+
+            for vuln in result.vulnerability_points[:15]:  # Show top 15
+                conf_color = "green" if vuln.confidence >= 0.7 else "yellow" if vuln.confidence >= 0.4 else "red"
+                table.add_row(
+                    vuln.file_path[:28] + "..." if len(vuln.file_path) > 30 else vuln.file_path,
+                    f"{vuln.start_line}-{vuln.end_line}",
+                    vuln.vulnerability_type.replace("_", " "),
+                    f"[{conf_color}]{vuln.confidence:.2f}[/{conf_color}]",
+                    vuln.explanation[:38] + "..." if len(vuln.explanation) > 40 else vuln.explanation,
+                )
+
+            console.print(table)
+
+            if len(result.vulnerability_points) > 15:
+                console.print(f"\n[dim]... and {len(result.vulnerability_points) - 15} more[/dim]")
+
+        # Display recommended patterns
+        if result.recommended_patterns:
+            console.print(f"\n[bold]Recommended Injection Patterns:[/bold]\n")
+
+            for rec in result.recommended_patterns[:5]:
+                console.print(f"  • [cyan]{rec.get('pattern_id', 'N/A')}[/cyan]")
+                console.print(f"    Confidence: {rec.get('confidence', 0):.2f}")
+                console.print(f"    Target: {', '.join(rec.get('target_files', []))[:50]}")
+                console.print(f"    Rationale: {rec.get('rationale', '')[:60]}")
+                console.print()
+
+        if output:
+            console.print(f"\n[green]Full report written to {output}[/green]")
+
+        # Summary
+        console.print(f"\n[bold]Summary:[/bold]")
+        console.print(f"  High confidence vulnerabilities: {sum(1 for v in result.vulnerability_points if v.confidence >= 0.7)}")
+        console.print(f"  Medium confidence: {sum(1 for v in result.vulnerability_points if 0.4 <= v.confidence < 0.7)}")
+        console.print(f"  Low confidence: {sum(1 for v in result.vulnerability_points if v.confidence < 0.4)}")
+
+    except Exception as e:
+        console.print(f"[red]Error during analysis: {e}[/red]")
+        raise SystemExit(1)
+
+    finally:
+        analyzer.close()
 
 
 if __name__ == "__main__":

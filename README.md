@@ -79,6 +79,38 @@ The analyzer scans for:
 - **State management**: global state, caches, sessions
 - **Time-sensitive code**: timestamps, timeouts, TTLs
 
+### Neural Analysis (Deep Semantic Analysis)
+
+The neural analyzer uses Claude to perform deep semantic analysis of code, understanding logic and data flow rather than relying on regex patterns.
+
+```bash
+# Perform neural analysis on a codebase
+sdlc-inject neural-analyze ./path/to/codebase
+
+# Save detailed report to JSON
+sdlc-inject neural-analyze ./path/to/codebase --output neural-report.json
+
+# Focus on specific vulnerability types
+sdlc-inject neural-analyze ./path/to/codebase --focus race --focus coordination
+
+# Limit files to analyze
+sdlc-inject neural-analyze ./path/to/codebase --max-files 30
+
+# Use a specific Claude model
+sdlc-inject neural-analyze ./path/to/codebase --model claude-opus-4-20250514
+
+# Disable Exa enrichment (no similar vulnerability search)
+sdlc-inject neural-analyze ./path/to/codebase --no-enrich
+```
+
+Neural analysis provides:
+- **Semantic code understanding**: Analyzes actual code logic, not just pattern matching
+- **Vulnerability point identification**: Finds race conditions, state corruption, resource leaks
+- **Data flow analysis**: Traces how data flows through vulnerable code paths
+- **Suggested injections**: Specific code changes that would create realistic bugs
+- **Similar vulnerability search**: Uses Exa API to find similar issues in open source (optional)
+- **Related incident reports**: Finds real-world postmortems and engineering blog posts
+
 ### Pattern Injection
 
 ```bash
@@ -202,7 +234,8 @@ sdlc-inject/
 │   ├── grading.py               # Grading infrastructure
 │   ├── environment.py           # Environment generation
 │   ├── analyzer/                # Codebase analysis
-│   │   ├── agent.py             # AI-powered analyzer
+│   │   ├── agent.py             # AI-powered analyzer (regex-based)
+│   │   ├── neural.py            # Neural analyzer (Claude semantic analysis)
 │   │   ├── tools.py             # Analysis tools
 │   │   └── recommendations.py   # Pattern recommendations
 │   ├── enricher/                # Pattern enrichment
@@ -298,7 +331,8 @@ related_incidents:
 
 | Variable | Description |
 |----------|-------------|
-| `ANTHROPIC_API_KEY` | API key for AI-enhanced analysis and enrichment |
+| `ANTHROPIC_API_KEY` | API key for AI-enhanced analysis, enrichment, and neural analysis |
+| `EXA_API_KEY` | API key for Exa semantic search (optional, for neural analysis enrichment) |
 
 ## Development
 

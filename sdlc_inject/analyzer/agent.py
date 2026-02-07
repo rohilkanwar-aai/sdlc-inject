@@ -164,7 +164,7 @@ Format your response as JSON with the following structure:
         }
 
         payload = {
-            "model": "claude-opus-4-20250514",
+            "model": "claude-opus-4-6",
             "max_tokens": 4096,
             "system": self.SYSTEM_PROMPT,
             "messages": [{"role": "user", "content": prompt}],

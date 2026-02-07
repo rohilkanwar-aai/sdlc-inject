@@ -15,12 +15,12 @@ class TestNeuralCodeAnalyzerInit:
 
     def test_default_init(self):
         analyzer = NeuralCodeAnalyzer()
-        assert analyzer.model == "claude-opus-4-20250514"
+        assert analyzer.model == "claude-opus-4-6"
         assert analyzer.total_tokens == 0
 
     def test_custom_model(self):
-        analyzer = NeuralCodeAnalyzer(model="claude-opus-4-20250514")
-        assert analyzer.model == "claude-opus-4-20250514"
+        analyzer = NeuralCodeAnalyzer(model="claude-opus-4-6")
+        assert analyzer.model == "claude-opus-4-6"
 
     def test_exa_client_lazy_init(self):
         analyzer = NeuralCodeAnalyzer()

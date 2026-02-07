@@ -900,7 +900,7 @@ def _clone_github_repo(url: str, ref: str | None = None, shallow: bool = True) -
 @main.command("neural-analyze")
 @click.argument("codebase_path")
 @click.option("-o", "--output", help="Output file for analysis report (JSON)")
-@click.option("-m", "--model", default="claude-opus-4-20250514", help="Claude model to use")
+@click.option("-m", "--model", default="claude-opus-4-6", help="Claude model to use")
 @click.option("--max-files", default=20, help="Maximum files to analyze")
 @click.option("--focus", multiple=True, help="Focus on specific patterns (race, coordination, timing)")
 @click.option("--enrich/--no-enrich", default=True, help="Enrich with Exa search for similar vulnerabilities")
@@ -1147,7 +1147,7 @@ def neural_analyze(
 @click.option("-t", "--target", required=True, help="Target codebase with injected pattern")
 @click.option("-o", "--output", required=True, help="Output directory for results")
 @click.option("-n", "--num-agents", default=10, help="Number of parallel agents")
-@click.option("-m", "--model", default="claude-opus-4-20250514", help="Claude model to use")
+@click.option("-m", "--model", default="claude-opus-4-6", help="Claude model to use")
 @click.option("--temperatures", default="0.0", help="Comma-separated temperature values")
 @click.option("--timeout", default=3600, help="Max time per agent in seconds")
 @click.option("--artifacts", help="Path to debugging artifacts")
@@ -1315,7 +1315,7 @@ def evaluate(
 @main.command("generate-services")
 @click.argument("report_file")
 @click.option("-o", "--output", required=True, help="Output directory for ServiceConfig YAML files")
-@click.option("-m", "--model", default="claude-opus-4-20250514", help="Claude model for schema generation")
+@click.option("-m", "--model", default="claude-opus-4-6", help="Claude model for schema generation")
 @click.option("--max-tools", default=5, help="Maximum number of tools to generate configs for")
 @click.pass_context
 def generate_services(

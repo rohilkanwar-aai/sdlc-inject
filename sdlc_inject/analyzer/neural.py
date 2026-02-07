@@ -164,7 +164,6 @@ Catalog patterns available:
         self,
         model: str = DEFAULT_MODEL,
         exa_api_key: str | None = None,
-        max_budget_usd: float = 5.0,
         # Kept for backward compatibility but no longer used for SDK auth
         api_key: str | None = None,
     ):
@@ -174,12 +173,10 @@ Catalog patterns available:
         Args:
             model: Claude model to use
             exa_api_key: Optional Exa API key for semantic search enrichment
-            max_budget_usd: Maximum cost budget per analysis run
             api_key: Deprecated -- SDK reads ANTHROPIC_API_KEY from env
         """
         self.model = model
         self.exa_api_key = exa_api_key or os.environ.get("EXA_API_KEY")
-        self.max_budget_usd = max_budget_usd
         self.usage_stats = SDKUsageStats()
 
         # httpx client kept only for Exa API calls
@@ -260,7 +257,6 @@ instructions."""
             allowed_tools=["Read", "Glob", "Grep"],
             model=self.model,
             max_turns=max_files * 3,  # ~3 tool calls per file
-            max_budget_usd=self.max_budget_usd,
             cwd=str(codebase_path),
         )
 

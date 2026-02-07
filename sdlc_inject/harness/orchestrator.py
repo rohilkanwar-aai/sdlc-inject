@@ -32,7 +32,6 @@ class EvaluationConfig:
     model: str = DEFAULT_MODEL
     temperatures: list[float] = field(default_factory=lambda: [0.0])
     task_prompt: str | None = None      # If None, generated from pattern
-    max_budget_per_agent: float = 2.0   # USD per agent
     # MCP mode configuration
     mcp_config: MCPConfig | None = None  # If set, enables MCP server mode
     pattern: "Pattern | None" = None     # Full pattern object for MCP mode
@@ -83,7 +82,6 @@ class AgentRunner:
         model: str,
         temperature: float,
         timeout: int = 3600,
-        max_budget_usd: float = 2.0,
         mcp_provider: MCPToolProvider | None = None,
     ):
         self.workspace_dir = workspace_dir
@@ -91,7 +89,6 @@ class AgentRunner:
         self.model = model
         self.temperature = temperature
         self.timeout = timeout
-        self.max_budget_usd = max_budget_usd
         self.mcp_provider = mcp_provider
         self.usage_stats = SDKUsageStats()
 
@@ -122,7 +119,6 @@ class AgentRunner:
             mcp_servers=mcp_servers if mcp_servers else None,
             model=self.model,
             max_turns=50,
-            max_budget_usd=self.max_budget_usd,
             cwd=str(self.workspace_dir),
         )
 
@@ -311,7 +307,6 @@ class Orchestrator:
                 model=config.model,
                 temperature=temp,
                 timeout=config.max_time_per_agent,
-                max_budget_usd=config.max_budget_per_agent,
                 mcp_provider=mcp_provider,
             )
             runners.append(runner)

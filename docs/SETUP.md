@@ -70,7 +70,7 @@ sdlc-inject --help
 sdlc-inject list
 
 # Quick test of API connectivity (uses the Anthropic API)
-sdlc-inject neural-analyze ./sdlc_inject --max-files 2 --no-enrich --max-budget 0.50
+sdlc-inject neural-analyze ./sdlc_inject --max-files 2 --no-enrich
 ```
 
 If the neural-analyze command works without errors, your API key and SDK are configured correctly.
@@ -171,7 +171,6 @@ pip install -e .
 If analysis is slow or produces warnings about rate limits, the Claude API may be throttling requests. You can:
 
 - Use `--max-files` to reduce the number of files analyzed
-- Use `--max-budget` to cap the total cost
 - Use `--no-enrich` to skip Exa enrichment (fewer API calls overall)
 
 ### Tests failing
@@ -310,8 +309,7 @@ sdlc-inject evaluate RACE-001 \
     --output ./eval-results \
     --mcp-mode \
     --service-configs ./service_configs/ \
-    -n 10 \
-    --max-budget 3.0
+    -n 10
 
 # 3. Review results
 cat eval-results/run_summary.json | python -m json.tool

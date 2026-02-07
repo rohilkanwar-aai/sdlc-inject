@@ -54,13 +54,11 @@ class TestCreateAgentOptions:
             allowed_tools=["Read", "Grep"],
             model="claude-sonnet-4-20250514",
             max_turns=10,
-            max_budget_usd=1.0,
             cwd="/tmp/test",
         )
         assert options.system_prompt == "Test prompt"
         assert options.allowed_tools == ["Read", "Grep"]
         assert options.max_turns == 10
-        assert options.max_budget_usd == 1.0
         assert options.cwd == "/tmp/test"
 
 

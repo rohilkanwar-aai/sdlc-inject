@@ -61,7 +61,6 @@ def create_agent_options(
     mcp_servers: dict | None = None,
     model: str = DEFAULT_MODEL,
     max_turns: int | None = None,
-    max_budget_usd: float | None = None,
     cwd: str | None = None,
     permission_mode: str = "bypassPermissions",
 ) -> ClaudeAgentOptions:
@@ -73,7 +72,6 @@ def create_agent_options(
         mcp_servers: MCP server configurations
         model: Claude model to use
         max_turns: Maximum conversation turns
-        max_budget_usd: Maximum cost budget in USD
         cwd: Working directory for the agent
         permission_mode: Permission mode (bypassPermissions for automated use)
 
@@ -94,8 +92,6 @@ def create_agent_options(
         kwargs["model"] = model
     if max_turns is not None:
         kwargs["max_turns"] = max_turns
-    if max_budget_usd is not None:
-        kwargs["max_budget_usd"] = max_budget_usd
     if cwd is not None:
         kwargs["cwd"] = cwd
 

@@ -91,9 +91,6 @@ sdlc-inject neural-analyze ./path/to/codebase --output report.json
 # Focus on specific vulnerability types
 sdlc-inject neural-analyze ./path/to/codebase --focus race --focus coordination
 
-# Control cost budget
-sdlc-inject neural-analyze ./path/to/codebase --max-budget 10.0
-
 # Disable tool discovery (skip extracting external tools from incidents)
 sdlc-inject neural-analyze ./path/to/codebase --no-discover-tools
 
@@ -191,9 +188,6 @@ sdlc-inject evaluate RACE-001 --target ./injected --output ./results --mcp-mode
 # With dynamic service configs from neural analysis
 sdlc-inject evaluate RACE-001 --target ./injected --output ./results \
     --mcp-mode --service-configs ./service_configs/
-
-# Control per-agent budget
-sdlc-inject evaluate RACE-001 --target ./injected --output ./results --max-budget 5.0
 
 # Temperature variations for diversity
 sdlc-inject evaluate RACE-001 --target ./injected --output ./results --temperatures 0.0,0.3,0.7

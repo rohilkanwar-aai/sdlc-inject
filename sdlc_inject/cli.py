@@ -907,7 +907,6 @@ def _clone_github_repo(url: str, ref: str | None = None, shallow: bool = True) -
 @click.option("--ref", help="Git branch, tag, or commit to checkout (for GitHub URLs)")
 @click.option("--shallow/--full", default=True, help="Shallow clone for faster downloads (for GitHub URLs)")
 @click.option("--keep-clone", is_flag=True, help="Keep cloned repo after analysis (for GitHub URLs)")
-@click.option("--max-budget", default=5.0, type=float, help="Maximum cost budget in USD for the analysis")
 @click.option("--discover-tools/--no-discover-tools", default=True, help="Discover external tools from incident data for dynamic MCP servers")
 @click.pass_context
 def neural_analyze(
@@ -921,7 +920,6 @@ def neural_analyze(
     ref: str | None,
     shallow: bool,
     keep_clone: bool,
-    max_budget: float,
     discover_tools: bool,
 ) -> None:
     """Perform deep neural analysis of a codebase using Claude Agent SDK.
@@ -947,7 +945,6 @@ def neural_analyze(
         sdlc-inject neural-analyze https://github.com/owner/repo --ref v1.0.0
         sdlc-inject neural-analyze https://github.com/owner/repo --full --keep-clone
         sdlc-inject neural-analyze ./my-project --focus race --focus coordination
-        sdlc-inject neural-analyze ./my-project --max-budget 10.0
     """
     import os
     import shutil
@@ -994,7 +991,6 @@ def neural_analyze(
     console.print(f"[bold]Neural Analysis of {codebase_path}[/bold]\n")
     console.print(f"Model: {model}")
     console.print(f"Max files: {max_files}")
-    console.print(f"Max budget: ${max_budget:.2f}")
     if focus:
         console.print(f"Focus patterns: {', '.join(focus)}")
     console.print(f"Exa enrichment: {'enabled' if enrich else 'disabled'}")
@@ -1003,7 +999,6 @@ def neural_analyze(
     analyzer = NeuralCodeAnalyzer(
         model=model,
         exa_api_key=exa_key if enrich else None,
-        max_budget_usd=max_budget,
     )
 
     try:
@@ -1155,7 +1150,6 @@ def neural_analyze(
 @click.option("-m", "--model", default="claude-sonnet-4-20250514", help="Claude model to use")
 @click.option("--temperatures", default="0.0", help="Comma-separated temperature values")
 @click.option("--timeout", default=3600, help="Max time per agent in seconds")
-@click.option("--max-budget", default=2.0, type=float, help="Maximum cost budget per agent in USD")
 @click.option("--artifacts", help="Path to debugging artifacts")
 @click.option("--mcp-mode", is_flag=True, help="Enable MCP servers for observability tools")
 @click.option("--mcp-rate-limit", default=30, help="MCP API requests per minute limit")
@@ -1171,7 +1165,6 @@ def evaluate(
     model: str,
     temperatures: str,
     timeout: int,
-    max_budget: float,
     artifacts: str | None,
     mcp_mode: bool,
     mcp_rate_limit: int,
@@ -1190,7 +1183,6 @@ def evaluate(
     Examples:
         sdlc-inject evaluate RACE-001 --target ./injected-codebase --output ./results -n 10
         sdlc-inject evaluate RACE-001 --target ./injected --output ./results --mcp-mode
-        sdlc-inject evaluate RACE-001 --target ./injected --output ./results --max-budget 5.0
     """
     import asyncio
 
@@ -1240,7 +1232,6 @@ def evaluate(
         artifacts_dir=Path(artifacts) if artifacts else None,
         num_agents=num_agents,
         max_time_per_agent=timeout,
-        max_budget_per_agent=max_budget,
         model=model,
         temperatures=temp_list,
         mcp_config=mcp_config,
@@ -1253,7 +1244,6 @@ def evaluate(
     console.print(f"Model: {model}")
     console.print(f"Temperatures: {temp_list}")
     console.print(f"Timeout: {timeout}s per agent")
-    console.print(f"Budget: ${max_budget:.2f} per agent")
     console.print(f"Backend: Claude Agent SDK")
     if mcp_mode:
         console.print(f"MCP Mode: [green]Enabled[/green] (rate limit: {mcp_rate_limit}/min)")

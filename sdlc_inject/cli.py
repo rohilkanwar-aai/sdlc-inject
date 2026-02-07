@@ -899,7 +899,7 @@ def _clone_github_repo(url: str, ref: str | None = None, shallow: bool = True) -
 
 @main.command("neural-analyze")
 @click.argument("codebase_path")
-@click.option("-o", "--output", help="Output file for analysis report (JSON)")
+@click.option("-o", "--output", default=None, help="Output file for analysis report (JSON). Auto-generated if not specified.")
 @click.option("-m", "--model", default="claude-opus-4-6", help="Claude model to use")
 @click.option("--max-files", default=0, type=int, help="Maximum files to analyze (0 = no limit, explore all)")
 @click.option("--focus", multiple=True, help="Focus on specific patterns (race, coordination, timing)")
@@ -988,8 +988,18 @@ def neural_analyze(
 
         console.print(f"[green]Repository cloned to: {temp_dir}[/green]\n")
 
+    # Auto-generate output path if not specified
+    if output is None:
+        # Derive name from codebase path (repo name or directory name)
+        if _is_github_url(codebase_path):
+            repo_name = codebase_path.rstrip("/").split("/")[-1].replace(".git", "")
+        else:
+            repo_name = Path(codebase_path).resolve().name
+        output = f"{repo_name}-neural-report.json"
+
     console.print(f"[bold]Neural Analysis of {codebase_path}[/bold]\n")
     console.print(f"Model: {model}")
+    console.print(f"Output: {output}")
     console.print(f"Max files: {'all' if max_files == 0 else max_files}")
     if focus:
         console.print(f"Focus patterns: {', '.join(focus)}")
@@ -1042,6 +1052,11 @@ def neural_analyze(
                             console.print(f"\n[green]Saved {len(paths)} service configs to {output_dir}[/green]")
                 except Exception as e:
                     console.print(f"[yellow]Warning: Service config generation failed: {e}[/yellow]")
+
+        # Always save the final report (including enrichment + discovered tools)
+        import json as json_mod
+        with open(output, "w") as f:
+            json_mod.dump(result.to_dict(), f, indent=2)
 
         # Display results
         console.print("\n[bold]Analysis Results[/bold]\n")
@@ -1118,8 +1133,7 @@ def neural_analyze(
 
             console.print(tools_table)
 
-        if output:
-            console.print(f"\n[green]Full report written to {output}[/green]")
+        console.print(f"\n[green]Report saved to {output}[/green]")
 
         # Summary
         console.print(f"\n[bold]Summary:[/bold]")

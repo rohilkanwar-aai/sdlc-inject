@@ -901,7 +901,7 @@ def _clone_github_repo(url: str, ref: str | None = None, shallow: bool = True) -
 @click.argument("codebase_path")
 @click.option("-o", "--output", help="Output file for analysis report (JSON)")
 @click.option("-m", "--model", default="claude-opus-4-6", help="Claude model to use")
-@click.option("--max-files", default=20, help="Maximum files to analyze")
+@click.option("--max-files", default=0, type=int, help="Maximum files to analyze (0 = no limit, explore all)")
 @click.option("--focus", multiple=True, help="Focus on specific patterns (race, coordination, timing)")
 @click.option("--enrich/--no-enrich", default=True, help="Enrich with Exa search for similar vulnerabilities")
 @click.option("--ref", help="Git branch, tag, or commit to checkout (for GitHub URLs)")
@@ -990,7 +990,7 @@ def neural_analyze(
 
     console.print(f"[bold]Neural Analysis of {codebase_path}[/bold]\n")
     console.print(f"Model: {model}")
-    console.print(f"Max files: {max_files}")
+    console.print(f"Max files: {'all' if max_files == 0 else max_files}")
     if focus:
         console.print(f"Focus patterns: {', '.join(focus)}")
     console.print(f"Exa enrichment: {'enabled' if enrich else 'disabled'}")

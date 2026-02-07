@@ -201,7 +201,7 @@ Catalog patterns available:
     async def analyze_codebase_async(
         self,
         codebase_path: str | Path,
-        max_files: int = 20,
+        max_files: int = 0,
         focus_patterns: list[str] | None = None,
         output_file: str | Path | None = None,
     ) -> NeuralAnalysisResult:
@@ -214,7 +214,7 @@ Catalog patterns available:
 
         Args:
             codebase_path: Path to the codebase
-            max_files: Suggested maximum files to analyze
+            max_files: Maximum files to analyze (0 = no limit, explore all)
             focus_patterns: Pattern types to focus on (e.g., ["race", "coordination"])
             output_file: Optional file to write results
 
@@ -223,10 +223,11 @@ Catalog patterns available:
         """
         codebase_path = Path(codebase_path)
 
-        # Build seed hints from heuristic file selector
-        seed_files = self._find_relevant_files(codebase_path, max_files)
+        # Build seed hints from heuristic file selector (top 50 as starting suggestions)
+        hint_count = max_files if max_files > 0 else 50
+        seed_files = self._find_relevant_files(codebase_path, hint_count)
         seed_hints = "\n".join(
-            f"- {f.relative_to(codebase_path)}" for f in seed_files[:max_files]
+            f"- {f.relative_to(codebase_path)}" for f in seed_files
         )
 
         # Build the exploration prompt
@@ -237,6 +238,12 @@ Catalog patterns available:
                 f"{', '.join(focus_patterns)}"
             )
 
+        file_limit_str = (
+            f"Analyze up to {max_files} files."
+            if max_files > 0
+            else "Analyze as many files as needed to be thorough."
+        )
+
         prompt = f"""Analyze the codebase at the current working directory for potential \
 failure injection points.
 
@@ -245,18 +252,20 @@ if you find interesting leads):
 
 {seed_hints}
 
-Analyze up to {max_files} files. For each file you read, identify specific vulnerability \
+{file_limit_str} For each file you read, identify specific vulnerability \
 points where realistic bugs could be injected.{focus_str}
 
 After exploring, output your complete findings as the JSON structure described in your \
 instructions."""
 
         # Run the agent with exploration tools
+        # No max_turns limit when max_files=0 (let the agent explore freely)
+        max_turns = max_files * 3 if max_files > 0 else None
         options = create_agent_options(
             system_prompt=self.SYSTEM_PROMPT,
             allowed_tools=["Read", "Glob", "Grep"],
             model=self.model,
-            max_turns=max_files * 3,  # ~3 tool calls per file
+            max_turns=max_turns,
             cwd=str(codebase_path),
         )
 
@@ -315,7 +324,7 @@ instructions."""
     def analyze_codebase(
         self,
         codebase_path: str | Path,
-        max_files: int = 20,
+        max_files: int = 0,
         focus_patterns: list[str] | None = None,
         output_file: str | Path | None = None,
     ) -> NeuralAnalysisResult:
@@ -415,7 +424,9 @@ instructions."""
                 all_files.append((file_path, score))
 
         all_files.sort(key=lambda x: x[1], reverse=True)
-        return [f[0] for f in all_files[:max_files]]
+        if max_files > 0:
+            return [f[0] for f in all_files[:max_files]]
+        return [f[0] for f in all_files]
 
     # ------------------------------------------------------------------
     # Exa enrichment (unchanged -- direct HTTP, not Claude)

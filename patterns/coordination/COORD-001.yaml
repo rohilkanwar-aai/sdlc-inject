@@ -1,5 +1,5 @@
 id: COORD-001
-version: "1.0"
+version: "2.0"
 name: "Distributed lock double-grant during lease expiration"
 category: "Distributed System Failures"
 subcategory: "Consensus & Coordination"
@@ -14,6 +14,68 @@ description: |
   a lock, pauses (e.g., GC), the lease expires, Process B acquires the lock,
   then Process A resumes and still believes it holds the lock.
 
+# V2.0 - Codebase-independent injection
+requirements:
+  languages: ["rust", "python", "go", "java"]
+  patterns:
+    - "distributed_lock"
+    - "lease_expiration"
+    - "lock_acquisition"
+    - "mutex_guard"
+  frameworks: ["redis", "etcd", "zookeeper", "consul"]
+  min_complexity: 4
+
+injection_template:
+  description: |
+    Remove fencing token validation from the distributed lock implementation.
+    The lock will use lease expiration but won't include a monotonic fencing
+    token, allowing old holders to continue operating after lease expiry.
+
+  detection_query: |
+    Find code that:
+    1. Implements distributed locking with leases
+    2. Validates lock ownership before operations
+    Look for: acquire_lock(), is_valid(), LockGuard, fencing_token
+
+  rust:
+    target_pattern: 'fn\s+is_valid\s*\(\s*&self\s*,\s*guard\s*:\s*&LockGuard\s*\)'
+    injection_code: |
+      // Bug: Only checks lock_id, not fencing token
+      guard.lock_id == self.id
+    file_patterns:
+      - "**/src/**/lock*.rs"
+      - "**/src/**/coordination*.rs"
+
+  python:
+    target_pattern: 'def\s+is_valid\s*\(\s*self\s*,\s*guard\s*\)'
+    injection_code: |
+      # Bug: Only checks lock_id, not fencing token
+      return guard.lock_id == self.id
+    file_patterns:
+      - "**/*lock*.py"
+      - "**/*coordination*.py"
+
+  go:
+    target_pattern: 'func\s+\([^)]+\)\s+IsValid\s*\(guard\s+\*LockGuard\)\s+bool'
+    injection_code: |
+      // Bug: Only checks lock_id, not fencing token
+      return guard.LockID == l.ID
+    file_patterns:
+      - "**/*lock*.go"
+
+  java:
+    target_pattern: 'public\s+boolean\s+isValid\s*\(LockGuard\s+guard\)'
+    injection_code: |
+      // Bug: Only checks lock_id, not fencing token
+      return guard.getLockId().equals(this.id);
+    file_patterns:
+      - "**/lock/*.java"
+      - "**/coordination/*.java"
+
+  obfuscation_level: "high"
+  disguise_as: "simplification"
+
+# V1.0 - Codebase-specific injection (preserved)
 target_codebase:
   name: "zed"
   min_version: "0.120.0"

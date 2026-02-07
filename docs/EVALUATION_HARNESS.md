@@ -14,6 +14,7 @@ Infrastructure to calibrate pattern difficulty by running N parallel Claude agen
 │   │   Catalog    │────▶│  - Spin up N isolated environments       │        │
 │   │  (YAML)      │     │  - Dispatch agents in parallel           │        │
 │   └──────────────┘     │  - Collect trajectories                  │        │
+│                        │  - Configure MCP mode (optional)         │        │
 │                        └──────────────┬───────────────────────────┘        │
 │                                       │                                     │
 │                    ┌──────────────────┼──────────────────┐                 │
@@ -27,6 +28,11 @@ Infrastructure to calibrate pattern difficulty by running N parallel Claude agen
 │            │  ┌───┴───┐  │    │  ┌───┴───┐  │    │  ┌───┴───┐  │          │
 │            │  │  MCP  │  │    │  │  MCP  │  │    │  │  MCP  │  │          │
 │            │  │Sandbox│  │    │  │Sandbox│  │    │  │Sandbox│  │          │
+│            │  └───┬───┘  │    │  └───┬───┘  │    │  └───┬───┘  │          │
+│            │      │      │    │      │      │    │      │      │          │
+│            │  ┌───┴───┐  │    │  ┌───┴───┐  │    │  ┌───┴───┐  │          │
+│            │  │  MCP  │  │    │  │  MCP  │  │    │  │  MCP  │  │          │
+│            │  │Servers│  │    │  │Servers│  │    │  │Servers│  │          │
 │            │  └───────┘  │    │  └───────┘  │    │  └───────┘  │          │
 │            └──────┬──────┘    └──────┬──────┘    └──────┬──────┘          │
 │                   │                  │                  │                  │
@@ -35,6 +41,7 @@ Infrastructure to calibrate pattern difficulty by running N parallel Claude agen
 │            │              Trajectory Collector                    │        │
 │            │  - Every tool call logged with timestamp            │        │
 │            │  - File reads/writes captured                       │        │
+│            │  - MCP API calls tracked with rate limits           │        │
 │            │  - Reasoning steps (if available)                   │        │
 │            └─────────────────────────┬───────────────────────────┘        │
 │                                      │                                     │
@@ -45,6 +52,7 @@ Infrastructure to calibrate pattern difficulty by running N parallel Claude agen
 │            │  - Failure mode clustering                          │        │
 │            │  - Time-to-resolution distribution                  │        │
 │            │  - Tool usage patterns                              │        │
+│            │  - MCP API efficiency metrics                       │        │
 │            │  - Root cause identification accuracy               │        │
 │            └─────────────────────────────────────────────────────┘        │
 │                                                                             │
@@ -214,6 +222,87 @@ class AnalyticsPipeline:
 
 ---
 
+## MCP Mode (Mock Observability Tools)
+
+MCP Mode provides agents with interactive access to mock observability tools (Sentry, Slack, GitHub, PagerDuty, Prometheus) populated with pattern-specific debugging data. This simulates real-world incident response workflows.
+
+### MCP Tool Provider (`sdlc_inject/harness/mcp_integration.py`)
+
+```python
+@dataclass
+class MCPConfig:
+    enabled: bool = True
+    seed: int | None = None          # For reproducible data
+
+    # Rate limiting
+    rate_limit_enabled: bool = True
+    requests_per_minute: int = 30
+    burst_limit: int = 5
+    penalty_multiplier: float = 2.0   # Exponential backoff factor
+
+    # Service toggles
+    enable_sentry: bool = True
+    enable_slack: bool = True
+    enable_github: bool = True
+    enable_pagerduty: bool = True
+    enable_prometheus: bool = True
+
+@dataclass
+class MCPStats:
+    total_requests: int = 0
+    successful_requests: int = 0
+    rate_limited_requests: int = 0
+    requests_by_service: dict[str, int]
+    rate_limit_violations: int = 0
+    avg_response_time_ms: float = 0.0
+```
+
+### Available MCP Tools
+
+| Service | Tools | Description |
+|---------|-------|-------------|
+| **Sentry** | `sentry_list_issues`, `sentry_get_issue`, `sentry_get_events` | Error tracking with stack traces |
+| **Slack** | `slack_list_channels`, `slack_get_messages`, `slack_get_thread` | Incident channel communications |
+| **GitHub** | `github_list_issues`, `github_get_issue`, `github_list_commits`, `github_get_pull_request` | Code history and discussions |
+| **PagerDuty** | `pagerduty_list_incidents`, `pagerduty_get_incident`, `pagerduty_get_timeline` | Alert and escalation data |
+| **Prometheus** | `prometheus_query`, `prometheus_query_range`, `prometheus_list_alerts` | Metrics and alert state |
+
+### Rate Limiting as Reward Signal
+
+MCP mode enforces rate limits to train efficient API usage:
+
+```python
+class MCPToolProvider:
+    def get_grading_score_adjustment(self) -> float:
+        """
+        Returns a multiplier (0.8-1.0) that penalizes:
+        - Rate limit violations: -2% per violation (max -10%)
+        - Excessive API calls (>50): -0.2% per excess call (max -10%)
+        - Low success rate (<80%): proportional penalty
+        """
+```
+
+This encourages agents to:
+- Query efficiently rather than brute-force searching
+- Respect rate limits and implement backoff
+- Use targeted queries with filters
+
+### Standalone MCP Server
+
+Test MCP endpoints manually before running evaluations:
+
+```bash
+# Start standalone server
+sdlc-inject mcp-server RACE-001 --port 8080 --seed 42
+
+# Test endpoints
+curl http://localhost:8080/sentry/issues
+curl http://localhost:8080/slack/channels
+curl http://localhost:8080/prometheus/alerts
+```
+
+---
+
 ## CLI Commands
 
 ```bash
@@ -228,6 +317,14 @@ sdlc-inject evaluate RACE-001 \
   --target ./my-codebase \
   --num-agents 30 \
   --temperatures 0.0,0.3,0.7 \
+  --output ./evaluation-results
+
+# With MCP mode (agents get access to mock observability tools)
+sdlc-inject evaluate RACE-001 \
+  --target ./my-codebase \
+  --mcp-mode \
+  --mcp-rate-limit 30 \
+  --mcp-seed 42 \
   --output ./evaluation-results
 
 # Analyze existing trajectories
@@ -280,16 +377,32 @@ sdlc-inject compare-patterns RACE-001 RACE-002 \
 
   "successful_patterns": {
     "common_tool_sequence": [
-      "read_file(artifacts/sentry.json)",
-      "grep(buffer ownership)",
+      "sentry_list_issues()",
+      "sentry_get_issue(issue_123)",
       "read_file(src/db/buffers.rs)",
-      "read_file(src/rpc/protocol.rs)",
-      "bash(cargo test)",
+      "slack_get_messages(incident-channel)",
+      "prometheus_query(buffer_conflicts)",
       "edit_file(src/db/buffers.rs)",
       "bash(cargo test)"
     ],
     "avg_files_read": 4.2,
     "root_cause_mentioned": true
+  },
+
+  "mcp_stats": {
+    "total_requests": 847,
+    "successful_requests": 812,
+    "rate_limited_requests": 35,
+    "requests_by_service": {
+      "sentry": 156,
+      "slack": 234,
+      "github": 189,
+      "pagerduty": 98,
+      "prometheus": 170
+    },
+    "rate_limit_violations": 12,
+    "avg_response_time_ms": 45.2,
+    "grading_adjustment_avg": 0.94
   },
 
   "recommendations": {

@@ -1,0 +1,49 @@
+# Complex Multi-Pattern: Network Partition Masking Race Condition
+#
+# This is a particularly tricky scenario where:
+# - A split-brain issue (SPLIT-001) causes dual edit authority
+# - A race condition (RACE-002) in ID generation causes collisions
+# - The race condition is EASIER to see during partition recovery
+#
+# Many investigators will:
+# 1. Notice the split-brain issue during partition
+# 2. Fix the dual authority problem
+# 3. Think they're done
+# 4. Still see ID collisions and blame the network again
+# 5. Eventually realize the ID generation race exists independently
+
+id: COMPLEX-003
+name: "Split-brain concealing race condition in ID generation"
+description: |
+  A split-brain issue during network partition creates dual edit
+  authority. However, there's ALSO a race condition in document
+  ID generation that exists independently.
+
+  The split-brain makes the race condition more visible because
+  both partitions are generating IDs concurrently. But fixing
+  only the split-brain doesn't fix the race - it can still occur
+  with high concurrent load on a single partition.
+
+  Success requires:
+  1. Identifying AND fixing the split-brain issue
+  2. Recognizing the ID generation bug is separate
+  3. Fixing the race condition with proper atomic ID generation
+
+patterns:
+  - pattern_id: RACE-002
+    weight: 1.0              # Root cause - ID generation race
+    hints_enabled: true
+    injection_probability: 1.0
+
+  - pattern_id: SPLIT-001
+    weight: 0.7              # Major contributing factor - makes race visible
+    hints_enabled: true
+    injection_probability: 1.0
+
+grading:
+  root_cause_pattern: RACE-002
+  partial_credit:
+    SPLIT-001: 0.35  # High credit - this IS a real bug that needs fixing
+
+total_difficulty_multiplier: 1.8
+estimated_human_time_hours: 6.0

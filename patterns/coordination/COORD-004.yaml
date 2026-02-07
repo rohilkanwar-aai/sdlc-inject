@@ -1,5 +1,5 @@
 id: COORD-004
-version: "1.0"
+version: "2.0"
 name: "Vector clock overflow causes ordering confusion"
 category: "Distributed System Failures"
 subcategory: "Consensus & Coordination Failures"
@@ -14,6 +14,60 @@ description: |
   the clock wraps around, causing newer events to appear older than ancient
   events, breaking causal ordering guarantees.
 
+# V2.0 - Codebase-independent injection
+requirements:
+  languages: ["rust", "go", "java", "python"]
+  patterns:
+    - "vector_clock"
+    - "lamport_clock"
+    - "logical_clock"
+    - "causality_tracking"
+  frameworks: []
+  min_complexity: 2
+
+injection_template:
+  description: |
+    Use wrapping arithmetic (silent overflow) for vector clock counters.
+    After overflow, newer events appear causally older than ancient events.
+
+  detection_query: |
+    Find code that:
+    1. Implements vector or Lamport clocks
+    2. Increments clock counters
+    Look for: increment(), tick(), VectorClock::new()
+
+  rust:
+    target_pattern: 'pub fn increment\s*\([^)]*\)'
+    injection_code: |
+      // Bug: wrapping_add silently overflows
+      let counter = self.counters.entry(node_id).or_insert(0u32);
+      *counter = counter.wrapping_add(1);
+    file_patterns:
+      - "**/src/**/vector_clock*.rs"
+      - "**/src/**/clock*.rs"
+
+  go:
+    target_pattern: 'func\s+\([^)]+\)\s+Increment\s*\([^)]*\)'
+    injection_code: |
+      // Bug: silent overflow on uint32
+      vc.counters[nodeID]++
+    file_patterns:
+      - "**/*vector_clock*.go"
+      - "**/*clock*.go"
+
+  python:
+    target_pattern: 'def\s+increment\s*\([^)]*\)'
+    injection_code: |
+      # Bug: Python int won't overflow but if we cast to uint32...
+      self.counters[node_id] = (self.counters.get(node_id, 0) + 1) & 0xFFFFFFFF
+    file_patterns:
+      - "**/*vector_clock*.py"
+      - "**/*clock*.py"
+
+  obfuscation_level: "low"
+  disguise_as: "implementation"
+
+# V1.0 - Codebase-specific injection (preserved)
 target_codebase:
   name: "zed"
   min_version: "0.120.0"

@@ -1,5 +1,5 @@
 id: RACE-005
-version: "1.0"
+version: "2.0"
 name: "Extension load/unload race"
 category: "Distributed System Failures"
 subcategory: "Race Conditions"
@@ -14,6 +14,74 @@ description: |
   The extension manager doesn't properly synchronize the unload operation
   with active feature usage.
 
+# V2.0 - Codebase-independent injection
+requirements:
+  languages: ["rust", "python", "typescript", "java", "go"]
+  patterns:
+    - "plugin_system"
+    - "extension_manager"
+    - "module_loading"
+    - "lifecycle_management"
+  frameworks: []
+  min_complexity: 2
+
+injection_template:
+  description: |
+    Modify extension unload to remove the extension before notifying
+    active users. This creates a race window where features can access
+    an extension that has already been removed.
+
+  detection_query: |
+    Find code that:
+    1. Unloads/removes extensions or plugins
+    2. Manages extension lifecycle
+    Look for: unload_extension(), remove_plugin(), disable_extension()
+
+  rust:
+    target_pattern: 'async fn unload_extension\s*\([^)]*\)\s*->\s*Result'
+    injection_code: |
+      // Bug: Remove before notifying users
+      self.extensions.remove(&ext_id);
+      self.notify_unload(ext_id).await;
+      Ok(())
+    file_patterns:
+      - "**/src/**/extension*.rs"
+      - "**/src/**/plugin*.rs"
+
+  python:
+    target_pattern: 'async def unload_extension\s*\([^)]*\)'
+    injection_code: |
+      # Bug: Remove before notifying users
+      del self.extensions[ext_id]
+      await self.notify_unload(ext_id)
+    file_patterns:
+      - "**/*extension*.py"
+      - "**/*plugin*.py"
+
+  typescript:
+    target_pattern: 'async\s+unloadExtension\s*\([^)]*\)'
+    injection_code: |
+      // Bug: Remove before notifying users
+      this.extensions.delete(extId);
+      await this.notifyUnload(extId);
+    file_patterns:
+      - "**/*extension*.ts"
+      - "**/*plugin*.ts"
+
+  go:
+    target_pattern: 'func\s+\([^)]+\)\s+UnloadExtension\s*\([^)]*\)'
+    injection_code: |
+      // Bug: Remove before notifying users
+      delete(m.extensions, extID)
+      m.notifyUnload(extID)
+    file_patterns:
+      - "**/*extension*.go"
+      - "**/*plugin*.go"
+
+  obfuscation_level: "low"
+  disguise_as: "cleanup"
+
+# V1.0 - Codebase-specific injection (preserved)
 target_codebase:
   name: "zed"
   min_version: "0.120.0"

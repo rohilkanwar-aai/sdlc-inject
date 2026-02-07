@@ -22,6 +22,12 @@ from .orchestrator import (
     AgentRunner,
     run_evaluation,
 )
+from .mcp_integration import (
+    MCPConfig,
+    MCPStats,
+    MCPToolProvider,
+    get_mcp_system_prompt_addition,
+)
 
 __all__ = [
     # Trajectory
@@ -43,4 +49,9 @@ __all__ = [
     "EvaluationRun",
     "AgentRunner",
     "run_evaluation",
+    # MCP Integration
+    "MCPConfig",
+    "MCPStats",
+    "MCPToolProvider",
+    "get_mcp_system_prompt_addition",
 ]

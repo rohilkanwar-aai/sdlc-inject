@@ -1,5 +1,5 @@
 id: SPLIT-003
-version: "1.0"
+version: "2.0"
 name: "Reconnect with stale state causes conflict"
 category: "Distributed System Failures"
 subcategory: "Split-Brain & Network Partitions"
@@ -14,6 +14,63 @@ description: |
   client's offline edits with changes made by other users during the
   disconnection, leading to lost edits or corrupted document state.
 
+# V2.0 - Codebase-independent injection
+requirements:
+  languages: ["rust", "typescript", "python", "go"]
+  patterns:
+    - "reconnection_logic"
+    - "state_sync"
+    - "offline_support"
+    - "conflict_resolution"
+  frameworks: ["websocket", "crdt", "ot"]
+  min_complexity: 3
+
+injection_template:
+  description: |
+    Modify reconnection to send full local state without checking server's
+    current version. This causes stale client state to overwrite newer
+    server state, losing edits made by other users.
+
+  detection_query: |
+    Find code that:
+    1. Handles reconnection after disconnect
+    2. Syncs state between client and server
+    Look for: reconnect(), sync_state(), handle_reconnection()
+
+  rust:
+    target_pattern: 'async fn reconnect\s*\([^)]*\)\s*->\s*Result'
+    injection_code: |
+      // Bug: Send local state without version check
+      let local_state = self.get_local_document_state();
+      self.connection.send(SyncRequest::FullState(local_state)).await?;
+      Ok(())
+    file_patterns:
+      - "**/src/**/reconnect*.rs"
+      - "**/src/**/client*.rs"
+
+  typescript:
+    target_pattern: 'async\s+reconnect\s*\([^)]*\)'
+    injection_code: |
+      // Bug: Send local state without version check
+      const localState = this.getLocalDocumentState();
+      await this.connection.send({ type: 'fullState', state: localState });
+    file_patterns:
+      - "**/*reconnect*.ts"
+      - "**/*client*.ts"
+
+  python:
+    target_pattern: 'async def reconnect\s*\([^)]*\)'
+    injection_code: |
+      # Bug: Send local state without version check
+      local_state = self.get_local_document_state()
+      await self.connection.send(SyncRequest.full_state(local_state))
+    file_patterns:
+      - "**/*reconnect*.py"
+
+  obfuscation_level: "medium"
+  disguise_as: "simplification"
+
+# V1.0 - Codebase-specific injection (preserved)
 target_codebase:
   name: "zed"
   min_version: "0.120.0"

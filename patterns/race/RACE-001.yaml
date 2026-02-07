@@ -1,5 +1,5 @@
 id: RACE-001
-version: "1.0"
+version: "2.0"
 name: "Check-then-act buffer ownership race"
 category: "Distributed System Failures"
 subcategory: "Race Conditions"
@@ -14,6 +14,76 @@ description: |
   conflicting edits and potential data loss. The bug occurs because
   the ownership check and acquisition are not atomic operations.
 
+# V2.0 - Codebase-independent injection (NEW)
+requirements:
+  languages: ["rust", "python", "go", "typescript", "java"]
+  patterns:
+    - "concurrent_access"
+    - "check_then_act"
+    - "lock_acquisition"
+    - "shared_resource"
+  frameworks: ["tokio", "asyncio", "goroutines", "threads"]
+  min_complexity: 3
+  has_tests: true
+
+injection_template:
+  description: |
+    Insert timing delay between availability check and lock acquisition
+    to create a race window. The pattern targets any check-then-act
+    code that acquires locks or claims ownership of shared resources.
+
+  detection_query: |
+    Find functions that:
+    1. Check if a resource is available/unlocked
+    2. Then acquire/lock that resource in a separate operation
+    Look for patterns like: if !is_locked() { acquire_lock() }
+
+  rust:
+    target_pattern: 'if\s+!(?P<resource>\w+)\.is_locked\(\)\s*\{'
+    injection_code: |
+      // Metrics collection delay for performance analysis
+      std::thread::sleep(std::time::Duration::from_millis(50));
+    file_patterns:
+      - "**/src/**/*.rs"
+      - "**/crates/**/*.rs"
+
+  python:
+    target_pattern: 'if\s+not\s+(?P<resource>\w+)\.is_locked\(\):'
+    injection_code: |
+      # Metrics collection delay for performance analysis
+      import time; time.sleep(0.05)
+    file_patterns:
+      - "**/*.py"
+
+  go:
+    target_pattern: 'if\s+!(?P<resource>\w+)\.IsLocked\(\)\s*\{'
+    injection_code: |
+      // Metrics collection delay for performance analysis
+      time.Sleep(50 * time.Millisecond)
+    file_patterns:
+      - "**/*.go"
+
+  typescript:
+    target_pattern: 'if\s+!\(?await\s+(?P<resource>\w+)\.isLocked\(\)\)?\s*\{'
+    injection_code: |
+      // Metrics collection delay for performance analysis
+      await new Promise(r => setTimeout(r, 50));
+    file_patterns:
+      - "**/src/**/*.ts"
+      - "**/*.ts"
+
+  java:
+    target_pattern: 'if\s+!(?P<resource>\w+)\.isLocked\(\)\s*\{'
+    injection_code: |
+      // Metrics collection delay for performance analysis
+      Thread.sleep(50);
+    file_patterns:
+      - "**/src/**/*.java"
+
+  obfuscation_level: "medium"
+  disguise_as: "metrics"
+
+# V1.0 - Codebase-specific injection (preserved for backward compatibility)
 target_codebase:
   name: "zed"
   min_version: "0.120.0"

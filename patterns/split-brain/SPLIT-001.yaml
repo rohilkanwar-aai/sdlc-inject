@@ -1,5 +1,5 @@
 id: SPLIT-001
-version: "1.0"
+version: "2.0"
 name: "Collab server partition causes dual edit authority"
 category: "Distributed System Failures"
 subcategory: "Split-Brain & Network Partitions"
@@ -14,6 +14,72 @@ description: |
   divergent document states that cannot be automatically reconciled when
   the partition heals, leading to data loss or corruption.
 
+# V2.0 - Codebase-independent injection
+requirements:
+  languages: ["rust", "python", "go", "java"]
+  patterns:
+    - "leader_election"
+    - "quorum_check"
+    - "consensus"
+    - "replication"
+    - "distributed_state"
+  frameworks: ["raft", "paxos", "zookeeper", "etcd"]
+  min_complexity: 5
+
+injection_template:
+  description: |
+    Modify quorum checking to use stale peer counts instead of live checks,
+    and remove fencing token validation from edit acceptance. This allows
+    both sides of a partition to believe they are the leader.
+
+  detection_query: |
+    Find functions that:
+    1. Check quorum or determine leader status
+    2. Accept writes/edits that should require leadership
+    Look for: check_quorum(), is_leader(), replicate_*(), accept_write()
+
+  rust:
+    target_pattern: 'fn\s+check_quorum\s*\([^)]*\)\s*->\s*bool\s*\{'
+    injection_code: |
+      // Use cached peer count for efficiency (bug: may be stale)
+      let peer_count = self.cached_peer_count;
+      peer_count >= self.min_quorum
+    file_patterns:
+      - "**/src/**/consensus*.rs"
+      - "**/src/**/election*.rs"
+      - "**/src/**/cluster*.rs"
+
+  python:
+    target_pattern: 'def\s+check_quorum\s*\([^)]*\)\s*(?:->.*)?:'
+    injection_code: |
+      # Use cached peer count for efficiency (bug: may be stale)
+      return self._cached_peer_count >= self.min_quorum
+    file_patterns:
+      - "**/*consensus*.py"
+      - "**/*cluster*.py"
+
+  go:
+    target_pattern: 'func\s+\([^)]+\)\s+CheckQuorum\s*\([^)]*\)\s+bool\s*\{'
+    injection_code: |
+      // Use cached peer count for efficiency (bug: may be stale)
+      return s.cachedPeerCount >= s.minQuorum
+    file_patterns:
+      - "**/*consensus*.go"
+      - "**/*cluster*.go"
+
+  java:
+    target_pattern: 'public\s+boolean\s+checkQuorum\s*\([^)]*\)\s*\{'
+    injection_code: |
+      // Use cached peer count for efficiency (bug: may be stale)
+      return this.cachedPeerCount >= this.minQuorum;
+    file_patterns:
+      - "**/consensus/*.java"
+      - "**/cluster/*.java"
+
+  obfuscation_level: "high"
+  disguise_as: "performance"
+
+# V1.0 - Codebase-specific injection (preserved)
 target_codebase:
   name: "zed"
   min_version: "0.120.0"

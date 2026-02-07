@@ -1,5 +1,5 @@
 id: RACE-002
-version: "1.0"
+version: "2.0"
 name: "Concurrent document ID generation collision"
 category: "Distributed System Failures"
 subcategory: "Race Conditions"
@@ -13,6 +13,81 @@ description: |
   users create documents simultaneously. The ID generator uses a non-atomic
   read-increment-write pattern that can produce collisions under concurrent load.
 
+# V2.0 - Codebase-independent injection
+requirements:
+  languages: ["rust", "python", "go", "typescript", "java"]
+  patterns:
+    - "id_generation"
+    - "read_modify_write"
+    - "counter_increment"
+    - "sequence_generation"
+  frameworks: []
+  min_complexity: 2
+
+injection_template:
+  description: |
+    Replace atomic ID generation with a non-atomic read-increment-write pattern.
+    The bug manifests when concurrent requests read the same max ID before either
+    has written their incremented value.
+
+  detection_query: |
+    Find functions that:
+    1. Generate sequential IDs or counters
+    2. Use atomic operations or database sequences
+    Look for: next_id(), generate_id(), get_next_sequence()
+
+  rust:
+    target_pattern: '(?P<func>fn\s+(?:next_id|generate_id|get_next_\w+))'
+    injection_code: |
+      // Read current max (creates race window)
+      let current = self.get_current_max().await?;
+      std::thread::sleep(std::time::Duration::from_millis(10));
+      let next = current + 1;
+      self.set_current_max(next).await?;
+      Ok(next)
+    file_patterns:
+      - "**/src/**/*.rs"
+
+  python:
+    target_pattern: '(?P<func>def\s+(?:next_id|generate_id|get_next_\w+))'
+    injection_code: |
+      # Read current max (creates race window)
+      current = self.get_current_max()
+      import time; time.sleep(0.01)
+      next_id = current + 1
+      self.set_current_max(next_id)
+      return next_id
+    file_patterns:
+      - "**/*.py"
+
+  go:
+    target_pattern: '(?P<func>func.*(?:NextID|GenerateID|GetNext\w+))'
+    injection_code: |
+      // Read current max (creates race window)
+      current := s.getCurrentMax()
+      time.Sleep(10 * time.Millisecond)
+      next := current + 1
+      s.setCurrentMax(next)
+      return next, nil
+    file_patterns:
+      - "**/*.go"
+
+  typescript:
+    target_pattern: '(?P<func>(?:async\s+)?(?:nextId|generateId|getNext\w+))'
+    injection_code: |
+      // Read current max (creates race window)
+      const current = await this.getCurrentMax();
+      await new Promise(r => setTimeout(r, 10));
+      const next = current + 1;
+      await this.setCurrentMax(next);
+      return next;
+    file_patterns:
+      - "**/*.ts"
+
+  obfuscation_level: "medium"
+  disguise_as: "logging"
+
+# V1.0 - Codebase-specific injection (preserved)
 target_codebase:
   name: "zed"
   min_version: "0.120.0"

@@ -1,5 +1,5 @@
 id: SPLIT-002
-version: "1.0"
+version: "2.0"
 name: "Asymmetric network partition (cursor visible, edits lost)"
 category: "Distributed System Failures"
 subcategory: "Split-Brain & Network Partitions"
@@ -15,6 +15,59 @@ description: |
   moving on collaborators' screens but their edits silently disappear because
   acknowledgments never arrive and the client eventually times out.
 
+# V2.0 - Codebase-independent injection
+requirements:
+  languages: ["rust", "typescript", "python", "go"]
+  patterns:
+    - "message_acknowledgment"
+    - "async_messaging"
+    - "timeout_handling"
+    - "real_time_sync"
+  frameworks: ["websocket", "grpc", "socketio"]
+  min_complexity: 3
+
+injection_template:
+  description: |
+    Make some message types fire-and-forget (no ACK required) while others
+    require acknowledgment. Remove failure notification on timeout, causing
+    silent data loss when ACKs don't arrive.
+
+  detection_query: |
+    Find code that:
+    1. Sends different types of real-time messages
+    2. Handles message timeouts
+    Look for: send_message(), handle_timeout(), pending_acks
+
+  rust:
+    target_pattern: 'fn\s+handle_edit_timeout\s*\([^)]*\)'
+    injection_code: |
+      // Bug: Silently drop edit on timeout
+      self.pending_edits.remove(&edit_id);
+    file_patterns:
+      - "**/src/**/protocol*.rs"
+      - "**/src/**/rpc*.rs"
+
+  typescript:
+    target_pattern: 'handleEditTimeout\s*\([^)]*\)'
+    injection_code: |
+      // Bug: Silently drop edit on timeout
+      this.pendingEdits.delete(editId);
+    file_patterns:
+      - "**/*protocol*.ts"
+      - "**/*rpc*.ts"
+
+  python:
+    target_pattern: 'def\s+handle_edit_timeout\s*\([^)]*\)'
+    injection_code: |
+      # Bug: Silently drop edit on timeout
+      self.pending_edits.pop(edit_id, None)
+    file_patterns:
+      - "**/*protocol*.py"
+
+  obfuscation_level: "medium"
+  disguise_as: "performance"
+
+# V1.0 - Codebase-specific injection (preserved)
 target_codebase:
   name: "zed"
   min_version: "0.120.0"

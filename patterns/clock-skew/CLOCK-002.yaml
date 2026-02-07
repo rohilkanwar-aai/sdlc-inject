@@ -1,5 +1,5 @@
 id: CLOCK-002
-version: "1.0"
+version: "2.0"
 name: "Trace span parent-child timing impossibility"
 category: "Distributed System Failures"
 subcategory: "Clock Skew & Time Issues"
@@ -14,6 +14,58 @@ description: |
   This occurs because different services use their local system clocks without
   accounting for clock skew between machines.
 
+# V2.0 - Codebase-independent injection
+requirements:
+  languages: ["rust", "go", "java", "python", "typescript"]
+  patterns:
+    - "distributed_tracing"
+    - "span_creation"
+    - "observability"
+  frameworks: ["opentelemetry", "jaeger", "zipkin", "datadog"]
+  min_complexity: 2
+
+injection_template:
+  description: |
+    Use raw wall-clock time (SystemTime) for span timestamps instead of
+    synchronized or hybrid logical clocks. This causes impossible parent-child
+    timing when clocks are skewed between services.
+
+  detection_query: |
+    Find code that:
+    1. Creates tracing spans
+    2. Sets span timestamps
+    Look for: start_span(), end_span(), Span::new()
+
+  rust:
+    target_pattern: 'fn\s+start_span\s*\([^)]*\)'
+    injection_code: |
+      // Bug: Uses unsynchronized wall clock
+      let start_time = SystemTime::now();
+    file_patterns:
+      - "**/src/**/tracing*.rs"
+      - "**/src/**/telemetry*.rs"
+
+  go:
+    target_pattern: 'func\s+.*StartSpan\s*\([^)]*\)'
+    injection_code: |
+      // Bug: Uses unsynchronized wall clock
+      startTime := time.Now()
+    file_patterns:
+      - "**/*tracing*.go"
+      - "**/*telemetry*.go"
+
+  python:
+    target_pattern: 'def\s+start_span\s*\([^)]*\)'
+    injection_code: |
+      # Bug: Uses unsynchronized wall clock
+      start_time = datetime.now()
+    file_patterns:
+      - "**/*tracing*.py"
+
+  obfuscation_level: "low"
+  disguise_as: "simplification"
+
+# V1.0 - Codebase-specific injection (preserved)
 target_codebase:
   name: "zed"
   min_version: "0.120.0"

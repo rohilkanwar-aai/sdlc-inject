@@ -1,0 +1,51 @@
+# Complex Multi-Pattern: CRDT Coordination Breakdown
+#
+# This scenario combines multiple coordination bugs that interact:
+# - Vector clock overflow (COORD-004) corrupts ordering
+# - CRDT merge bug (COORD-002) drops operations during merge
+# - Tombstone accumulation (COORD-005) causes memory pressure
+#
+# The memory pressure from tombstones makes the system slow, which
+# increases the chance of concurrent operations, which triggers the
+# merge bug more frequently.
+
+id: COMPLEX-002
+name: "CRDT triple fault - overflow, merge, and memory"
+description: |
+  A complex scenario with three interacting coordination bugs.
+  The vector clock overflow is the root cause that triggers
+  cascading failures in merge logic and memory management.
+
+  Debugging path:
+  1. User notices memory growth (COORD-005 symptom)
+  2. Investigates tombstones, may fix GC
+  3. Still sees data loss - not the root cause
+  4. Notices ordering issues (COORD-002 symptom)
+  5. Investigates merge, may fix tiebreaking
+  6. Still intermittent - not the root cause
+  7. Finally traces to vector clock overflow (COORD-004)
+
+patterns:
+  - pattern_id: COORD-004
+    weight: 1.0              # Root cause - vector clock overflow
+    hints_enabled: true
+    injection_probability: 1.0
+
+  - pattern_id: COORD-002
+    weight: 0.6              # Contributing factor - merge bug
+    hints_enabled: true
+    injection_probability: 1.0
+
+  - pattern_id: COORD-005
+    weight: 0.4              # Contributing factor - tombstone accumulation
+    hints_enabled: true
+    injection_probability: 1.0
+
+grading:
+  root_cause_pattern: COORD-004
+  partial_credit:
+    COORD-002: 0.25  # Significant credit - this is a real bug too
+    COORD-005: 0.15  # Some credit - legitimate issue but not root cause
+
+total_difficulty_multiplier: 2.0
+estimated_human_time_hours: 8.0

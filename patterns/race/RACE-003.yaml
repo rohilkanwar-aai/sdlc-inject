@@ -1,5 +1,5 @@
 id: RACE-003
-version: "1.0"
+version: "2.0"
 name: "File watcher event deduplication race"
 category: "Distributed System Failures"
 subcategory: "Race Conditions"
@@ -14,6 +14,67 @@ description: |
   some file changes to be missed or processed twice, leading to stale
   editor state or duplicate operations.
 
+# V2.0 - Codebase-independent injection
+requirements:
+  languages: ["rust", "python", "go", "typescript", "java"]
+  patterns:
+    - "event_deduplication"
+    - "file_watcher"
+    - "concurrent_map"
+    - "time_window"
+  frameworks: ["inotify", "fsnotify", "watchdog", "chokidar"]
+  min_complexity: 2
+
+injection_template:
+  description: |
+    Replace thread-safe concurrent map with regular HashMap in event
+    deduplication logic. This creates a race between checking if an
+    event was recently seen and updating the seen timestamp.
+
+  detection_query: |
+    Find code that:
+    1. Deduplicates events based on time windows
+    2. Uses concurrent data structures for event tracking
+    Look for: should_process(), deduplicate(), recent_events
+
+  rust:
+    target_pattern: 'recent_events:\s*DashMap<[^>]+>'
+    injection_code: |
+      // Using HashMap for simplicity (bug: not thread-safe)
+      recent_events: std::collections::HashMap<PathBuf, Instant>,
+    file_patterns:
+      - "**/src/**/watcher*.rs"
+      - "**/src/**/fs*.rs"
+
+  python:
+    target_pattern: 'self\._recent_events\s*=\s*(?:ConcurrentDict|threading\.Lock)'
+    injection_code: |
+      # Using dict for simplicity (bug: not thread-safe)
+      self._recent_events = {}
+    file_patterns:
+      - "**/*watcher*.py"
+      - "**/*fs*.py"
+
+  go:
+    target_pattern: 'recentEvents\s+sync\.Map'
+    injection_code: |
+      // Using map for simplicity (bug: not thread-safe)
+      recentEvents map[string]time.Time
+    file_patterns:
+      - "**/*watcher*.go"
+
+  typescript:
+    target_pattern: 'recentEvents:\s*Map<string,\s*Date>'
+    injection_code: |
+      // Using object for simplicity (bug: not thread-safe)
+      recentEvents: Record<string, Date> = {};
+    file_patterns:
+      - "**/*watcher*.ts"
+
+  obfuscation_level: "low"
+  disguise_as: "simplification"
+
+# V1.0 - Codebase-specific injection (preserved)
 target_codebase:
   name: "zed"
   min_version: "0.120.0"

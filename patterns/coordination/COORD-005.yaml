@@ -1,5 +1,5 @@
 id: COORD-005
-version: "1.0"
+version: "2.0"
 name: "Tombstone accumulation causes memory exhaustion"
 category: "Distributed System Failures"
 subcategory: "Consensus & Coordination Failures"
@@ -14,6 +14,71 @@ description: |
   tombstones, causing unbounded memory growth over time, especially in
   documents with heavy editing (many delete operations).
 
+# V2.0 - Codebase-independent injection
+requirements:
+  languages: ["rust", "typescript", "python", "go"]
+  patterns:
+    - "crdt"
+    - "tombstone"
+    - "deletion_marker"
+    - "soft_delete"
+  frameworks: ["automerge", "yjs"]
+  min_complexity: 3
+
+injection_template:
+  description: |
+    Remove or disable tombstone garbage collection. Deleted elements are
+    kept forever, causing unbounded memory growth over time.
+
+  detection_query: |
+    Find code that:
+    1. Creates tombstones for deleted elements
+    2. Has garbage collection for tombstones
+    Look for: delete(), tombstones, gc_tombstones()
+
+  rust:
+    target_pattern: 'fn\s+delete\s*\([^)]*range[^)]*\)'
+    injection_code: |
+      // Create tombstones without GC
+      for pos in range.clone() {
+          let char_id = self.get_char_id(pos);
+          self.tombstones.insert(char_id, Tombstone::new());
+          // Bug: Never garbage collected
+      }
+      self.content.drain(range);
+    file_patterns:
+      - "**/src/**/tombstone*.rs"
+      - "**/src/**/crdt*.rs"
+
+  typescript:
+    target_pattern: 'delete\s*\([^)]*range[^)]*\)'
+    injection_code: |
+      // Create tombstones without GC
+      for (let i = range.start; i < range.end; i++) {
+          const charId = this.getCharId(i);
+          this.tombstones.set(charId, new Tombstone());
+          // Bug: Never garbage collected
+      }
+    file_patterns:
+      - "**/*tombstone*.ts"
+      - "**/*crdt*.ts"
+
+  python:
+    target_pattern: 'def\s+delete\s*\([^)]*range[^)]*\)'
+    injection_code: |
+      # Create tombstones without GC
+      for pos in range(start, end):
+          char_id = self.get_char_id(pos)
+          self.tombstones[char_id] = Tombstone()
+          # Bug: Never garbage collected
+    file_patterns:
+      - "**/*tombstone*.py"
+      - "**/*crdt*.py"
+
+  obfuscation_level: "medium"
+  disguise_as: "implementation"
+
+# V1.0 - Codebase-specific injection (preserved)
 target_codebase:
   name: "zed"
   min_version: "0.120.0"

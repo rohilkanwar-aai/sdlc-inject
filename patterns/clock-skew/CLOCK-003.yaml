@@ -1,5 +1,5 @@
 id: CLOCK-003
-version: "1.0"
+version: "2.0"
 name: "Cache expiration with clock jump causes stale data"
 category: "Distributed System Failures"
 subcategory: "Clock Skew & Time Issues"
@@ -14,6 +14,64 @@ description: |
   causing a cache stampede. Conversely, when the clock jumps backward, entries
   that should expire remain valid, serving stale data.
 
+# V2.0 - Codebase-independent injection
+requirements:
+  languages: ["rust", "go", "java", "python", "typescript"]
+  patterns:
+    - "cache_expiration"
+    - "ttl_management"
+    - "time_based_invalidation"
+  frameworks: ["redis", "memcached", "caffeine"]
+  min_complexity: 2
+
+injection_template:
+  description: |
+    Use wall-clock time (SystemTime) for cache TTL instead of monotonic time
+    (Instant). Clock jumps will cause mass expiration or stale data.
+
+  detection_query: |
+    Find code that:
+    1. Checks cache entry expiration
+    2. Sets cache TTL
+    Look for: is_expired(), set_ttl(), expires_at
+
+  rust:
+    target_pattern: 'fn\s+is_expired\s*\([^)]*\)\s*->\s*bool'
+    injection_code: |
+      // Bug: Wall clock can jump
+      let now = SystemTime::now();
+      entry.expires_at < now
+    file_patterns:
+      - "**/src/**/cache*.rs"
+
+  go:
+    target_pattern: 'func\s+.*IsExpired\s*\([^)]*\)\s+bool'
+    injection_code: |
+      // Bug: Wall clock can jump
+      return time.Now().After(e.expiresAt)
+    file_patterns:
+      - "**/*cache*.go"
+
+  python:
+    target_pattern: 'def\s+is_expired\s*\([^)]*\)'
+    injection_code: |
+      # Bug: Wall clock can jump
+      return datetime.now() > self.expires_at
+    file_patterns:
+      - "**/*cache*.py"
+
+  typescript:
+    target_pattern: 'isExpired\s*\([^)]*\)'
+    injection_code: |
+      // Bug: Wall clock can jump
+      return Date.now() > this.expiresAt;
+    file_patterns:
+      - "**/*cache*.ts"
+
+  obfuscation_level: "low"
+  disguise_as: "simplification"
+
+# V1.0 - Codebase-specific injection (preserved)
 target_codebase:
   name: "zed"
   min_version: "0.120.0"

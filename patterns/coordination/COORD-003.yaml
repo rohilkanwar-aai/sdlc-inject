@@ -1,5 +1,5 @@
 id: COORD-003
-version: "1.0"
+version: "2.0"
 name: "Operation ordering violation causes state divergence"
 category: "Distributed System Failures"
 subcategory: "Consensus & Coordination Failures"
@@ -14,6 +14,65 @@ description: |
   dependencies, leading to operations being applied before their prerequisites,
   causing divergent state between replicas.
 
+# V2.0 - Codebase-independent injection
+requirements:
+  languages: ["rust", "go", "python", "typescript"]
+  patterns:
+    - "operation_log"
+    - "causal_delivery"
+    - "event_sourcing"
+    - "replication"
+  frameworks: []
+  min_complexity: 3
+
+injection_template:
+  description: |
+    Apply remote operations immediately without checking causal dependencies.
+    Operations that depend on undelivered operations will fail or corrupt state.
+
+  detection_query: |
+    Find code that:
+    1. Receives operations from remote replicas
+    2. Applies operations to local state
+    Look for: apply_remote_operation(), receive_operation(), process_event()
+
+  rust:
+    target_pattern: 'fn\s+(?:apply_remote_operation|receive_operation)\s*\([^)]*\)'
+    injection_code: |
+      // Bug: Applies immediately without checking dependencies
+      if let Err(e) = self.apply(op) {
+          tracing::warn!("Failed to apply: {}", e);
+      }
+    file_patterns:
+      - "**/src/**/ops*.rs"
+      - "**/src/**/replication*.rs"
+
+  go:
+    target_pattern: 'func\s+.*(?:ApplyRemoteOperation|ReceiveOperation)\s*\([^)]*\)'
+    injection_code: |
+      // Bug: Applies immediately without checking dependencies
+      if err := r.apply(op); err != nil {
+          log.Printf("Failed to apply: %v", err)
+      }
+    file_patterns:
+      - "**/*ops*.go"
+      - "**/*replication*.go"
+
+  python:
+    target_pattern: 'def\s+(?:apply_remote_operation|receive_operation)\s*\([^)]*\)'
+    injection_code: |
+      # Bug: Applies immediately without checking dependencies
+      try:
+          self.apply(op)
+      except Exception as e:
+          logger.warning(f"Failed to apply: {e}")
+    file_patterns:
+      - "**/*ops*.py"
+
+  obfuscation_level: "medium"
+  disguise_as: "simplification"
+
+# V1.0 - Codebase-specific injection (preserved)
 target_codebase:
   name: "zed"
   min_version: "0.120.0"

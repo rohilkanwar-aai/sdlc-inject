@@ -1,5 +1,5 @@
 id: SPLIT-004
-version: "1.0"
+version: "2.0"
 name: "Leader election during network flap causes dual leaders"
 category: "Distributed System Failures"
 subcategory: "Split-Brain & Network Partitions"
@@ -14,6 +14,51 @@ description: |
   stepped down. Both leaders believe they are authoritative, leading to
   conflicting decisions and data corruption.
 
+# V2.0 - Codebase-independent injection
+requirements:
+  languages: ["rust", "go", "java", "python"]
+  patterns:
+    - "leader_election"
+    - "consensus_algorithm"
+    - "raft"
+    - "paxos"
+  frameworks: ["raft", "etcd", "consul", "zookeeper"]
+  min_complexity: 4
+
+injection_template:
+  description: |
+    Reduce election timeout to be too short for network conditions, and remove
+    leader lease validation. This allows dual leaders during network flaps.
+
+  detection_query: |
+    Find code that:
+    1. Implements leader election
+    2. Checks leader status
+    Look for: run_election(), is_leader(), become_leader(), election_timeout
+
+  rust:
+    target_pattern: 'fn\s+is_leader\s*\([^)]*\)\s*->\s*bool'
+    injection_code: |
+      // Bug: No lease verification
+      self.state == NodeState::Leader
+    file_patterns:
+      - "**/src/**/election*.rs"
+      - "**/src/**/leader*.rs"
+      - "**/src/**/raft*.rs"
+
+  go:
+    target_pattern: 'func\s+\([^)]+\)\s+IsLeader\s*\(\)\s+bool'
+    injection_code: |
+      // Bug: No lease verification
+      return n.state == StateLeader
+    file_patterns:
+      - "**/*election*.go"
+      - "**/*raft*.go"
+
+  obfuscation_level: "medium"
+  disguise_as: "simplification"
+
+# V1.0 - Codebase-specific injection (preserved)
 target_codebase:
   name: "zed"
   min_version: "0.120.0"

@@ -308,8 +308,100 @@ class RelatedIncident(BaseModel):
     tags: list[str] = []  # Tags like ["race-condition", "distributed", "database"]
 
 
+# ============================================================================
+# Codebase-Independent Pattern Schema (v2.0)
+# ============================================================================
+
+
+class PatternRequirements(BaseModel):
+    """Requirements for a pattern to be applicable to a codebase.
+
+    Instead of specifying a specific target codebase, patterns can define
+    generic requirements that the analyzer matches against any codebase.
+    """
+
+    languages: list[str] = []  # ["rust", "python", "go", "typescript"]
+    patterns: list[str] = []  # ["concurrent_access", "check_then_act", "async_operations"]
+    frameworks: list[str] = []  # ["tokio", "asyncio", "goroutines"]
+    min_complexity: int | None = None  # Minimum cyclomatic complexity
+    has_tests: bool | None = None  # Whether target should have existing tests
+
+
+class LanguageInjection(BaseModel):
+    """Language-specific injection code."""
+
+    target_pattern: str  # Regex pattern to match (with named groups)
+    injection_code: str  # Code to inject (can reference named groups with {name})
+    file_patterns: list[str] = []  # Glob patterns for files to search ["**/*.py"]
+
+
+class InjectionTemplate(BaseModel):
+    """Template-based injection for codebase-independent patterns.
+
+    Instead of specifying exact file paths, patterns define templates that
+    the injection engine matches against the target codebase.
+    """
+
+    description: str  # Human-readable description of what this injects
+    detection_query: str | None = None  # Query for finding injection points
+
+    # Language-specific injection configurations
+    rust: LanguageInjection | None = None
+    python: LanguageInjection | None = None
+    go: LanguageInjection | None = None
+    typescript: LanguageInjection | None = None
+    javascript: LanguageInjection | None = None
+    java: LanguageInjection | None = None
+
+    # Obfuscation settings for the injection
+    obfuscation_level: str = "medium"  # "none", "low", "medium", "high"
+    disguise_as: str | None = None  # "metrics", "logging", "tracing", etc.
+
+
+class MultiPatternEntry(BaseModel):
+    """A single pattern in a multi-pattern configuration."""
+
+    pattern_id: str
+    weight: float = 1.0  # Importance weight for grading (1.0 = root cause)
+    hints_enabled: bool = True
+    injection_probability: float = 1.0  # Probability of injecting this pattern
+
+
+class MultiPatternGrading(BaseModel):
+    """Grading configuration for multi-pattern scenarios."""
+
+    root_cause_pattern: str  # Pattern ID that is the actual root cause
+    partial_credit: dict[str, float] = {}  # Pattern ID -> credit for identifying
+
+
+class MultiPatternConfig(BaseModel):
+    """Configuration for injecting multiple patterns into a single codebase.
+
+    Allows creating complex, realistic debugging scenarios with
+    cascading failures, red herrings, and contributing factors.
+    """
+
+    id: str
+    name: str
+    description: str | None = None
+
+    patterns: list[MultiPatternEntry]
+    grading: MultiPatternGrading | None = None
+
+    # Metadata
+    total_difficulty_multiplier: float = 1.5  # How much harder than single pattern
+    estimated_human_time_hours: float | None = None
+
+
 class Pattern(BaseModel):
-    """A single injectable failure pattern."""
+    """A single injectable failure pattern.
+
+    Supports two modes:
+    1. Codebase-specific (v1.0): Uses `target_codebase` and `injection` with explicit file paths
+    2. Codebase-independent (v2.0): Uses `requirements` and `injection_template` with pattern matching
+
+    Both modes can coexist - a pattern may have both for different use cases.
+    """
 
     id: str
     version: str
@@ -318,11 +410,19 @@ class Pattern(BaseModel):
     subcategory: str
     sdlc_phases: SdlcPhases
     description: str
+
+    # V1.0 - Codebase-specific injection (optional)
     target_codebase: TargetCodebase | None = None
-    injection: Injection
+    injection: Injection | None = None
+
+    # V2.0 - Codebase-independent injection (optional)
+    requirements: PatternRequirements | None = None
+    injection_template: InjectionTemplate | None = None
+
+    # Common fields
     trigger: Trigger | None = None
     observable_symptoms: ObservableSymptoms | None = None
-    difficulty: Difficulty
+    difficulty: Difficulty | None = None
     failure_modes: FailureModes | None = None
     golden_path: GoldenPath | None = None
     grading: Grading | None = None
@@ -333,3 +433,17 @@ class Pattern(BaseModel):
     tags: list[str] = []
 
     model_config = {"populate_by_name": True}
+
+    @property
+    def is_codebase_independent(self) -> bool:
+        """Check if pattern uses codebase-independent injection."""
+        return self.requirements is not None and self.injection_template is not None
+
+    @property
+    def supported_languages(self) -> list[str]:
+        """Get list of languages this pattern supports."""
+        if self.requirements:
+            return self.requirements.languages
+        if self.target_codebase and self.target_codebase.language:
+            return [self.target_codebase.language]
+        return []

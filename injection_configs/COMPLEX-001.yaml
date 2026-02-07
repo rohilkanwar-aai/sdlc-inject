@@ -1,0 +1,37 @@
+# Complex Multi-Pattern: Cascading Distributed System Failure
+#
+# This scenario simulates a realistic cascading failure where:
+# - A race condition (root cause) allows invalid state
+# - Clock skew makes the problem intermittent and hard to diagnose
+# - The agent must identify RACE-001 as the root cause, not blame the clock
+
+id: COMPLEX-001
+name: "Cascading race condition with clock skew red herring"
+description: |
+  A check-then-act race condition in buffer ownership causes state corruption.
+  Clock skew between servers makes timestamps appear suspicious, leading
+  many investigators to incorrectly blame time synchronization.
+
+  The agent must:
+  1. Identify that clock skew is a symptom, not the cause
+  2. Find the actual race condition in lock acquisition
+  3. Prove the fix works regardless of clock state
+
+patterns:
+  - pattern_id: RACE-001
+    weight: 1.0              # Root cause - full credit for identifying
+    hints_enabled: true
+    injection_probability: 1.0  # Always inject
+
+  - pattern_id: CLOCK-002
+    weight: 0.3              # Red herring - partial credit for investigating
+    hints_enabled: false     # Don't give hints for red herrings
+    injection_probability: 1.0
+
+grading:
+  root_cause_pattern: RACE-001
+  partial_credit:
+    CLOCK-002: 0.15  # Some credit for identifying but less than root cause
+
+total_difficulty_multiplier: 1.5
+estimated_human_time_hours: 5.0

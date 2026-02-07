@@ -1,5 +1,5 @@
 id: SPLIT-005
-version: "1.0"
+version: "2.0"
 name: "Presence updates during partition create ghost users"
 category: "Distributed System Failures"
 subcategory: "Split-Brain & Network Partitions"
@@ -14,6 +14,57 @@ description: |
   doesn't properly reconcile, leaving "ghost" users that appear online but
   are actually disconnected, or real users appearing offline.
 
+# V2.0 - Codebase-independent injection
+requirements:
+  languages: ["rust", "typescript", "python", "go"]
+  patterns:
+    - "presence_system"
+    - "online_status"
+    - "user_tracking"
+    - "heartbeat"
+  frameworks: ["websocket", "socketio", "signalr"]
+  min_complexity: 2
+
+injection_template:
+  description: |
+    Remove version/timestamp from presence updates so stale updates can
+    overwrite fresh ones. Partition heal merges presence maps without
+    proper reconciliation.
+
+  detection_query: |
+    Find code that:
+    1. Updates user presence/online status
+    2. Handles partition recovery
+    Look for: update_presence(), handle_partition_heal(), presence_map
+
+  rust:
+    target_pattern: 'fn\s+update_presence\s*\([^)]*\)'
+    injection_code: |
+      // Bug: No timestamp comparison
+      self.presence_map.insert(user_id, status);
+    file_patterns:
+      - "**/src/**/presence*.rs"
+
+  typescript:
+    target_pattern: 'updatePresence\s*\([^)]*\)'
+    injection_code: |
+      // Bug: No timestamp comparison
+      this.presenceMap.set(userId, status);
+    file_patterns:
+      - "**/*presence*.ts"
+
+  python:
+    target_pattern: 'def\s+update_presence\s*\([^)]*\)'
+    injection_code: |
+      # Bug: No timestamp comparison
+      self.presence_map[user_id] = status
+    file_patterns:
+      - "**/*presence*.py"
+
+  obfuscation_level: "low"
+  disguise_as: "simplification"
+
+# V1.0 - Codebase-specific injection (preserved)
 target_codebase:
   name: "zed"
   min_version: "0.120.0"

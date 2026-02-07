@@ -1,5 +1,5 @@
 id: CLOCK-005
-version: "1.0"
+version: "2.0"
 name: "Session expiry calculation with clock drift"
 category: "Distributed System Failures"
 subcategory: "Clock Skew & Time Issues"
@@ -14,6 +14,69 @@ description: |
   clock drifts relative to the API server's clock, sessions may be prematurely
   rejected (server ahead) or improperly extended (server behind).
 
+# V2.0 - Codebase-independent injection
+requirements:
+  languages: ["rust", "go", "python", "typescript", "java"]
+  patterns:
+    - "session_validation"
+    - "token_expiry"
+    - "authentication"
+  frameworks: ["jwt", "oauth"]
+  min_complexity: 2
+
+injection_template:
+  description: |
+    Compute session age from creation timestamp without leeway for clock skew.
+    Cross-server validation will fail or misbehave when clocks differ.
+
+  detection_query: |
+    Find code that:
+    1. Validates session tokens
+    2. Compares timestamps for expiry
+    Look for: validate_session(), is_expired(), check_token()
+
+  rust:
+    target_pattern: 'fn\s+validate_session\s*\([^)]*\)\s*->\s*Result'
+    injection_code: |
+      // Bug: No clock skew tolerance
+      let now = SystemTime::now();
+      let token_age = now.duration_since(token.created_at)?;
+      if token_age > self.max_session_age {
+          return Err(AuthError::SessionExpired);
+      }
+    file_patterns:
+      - "**/src/**/auth*.rs"
+      - "**/src/**/session*.rs"
+
+  go:
+    target_pattern: 'func\s+.*ValidateSession\s*\([^)]*\)'
+    injection_code: |
+      // Bug: No clock skew tolerance
+      now := time.Now()
+      tokenAge := now.Sub(token.CreatedAt)
+      if tokenAge > s.maxSessionAge {
+          return nil, ErrSessionExpired
+      }
+    file_patterns:
+      - "**/*auth*.go"
+      - "**/*session*.go"
+
+  python:
+    target_pattern: 'def\s+validate_session\s*\([^)]*\)'
+    injection_code: |
+      # Bug: No clock skew tolerance
+      now = datetime.now()
+      token_age = now - token.created_at
+      if token_age > self.max_session_age:
+          raise AuthError("Session expired")
+    file_patterns:
+      - "**/*auth*.py"
+      - "**/*session*.py"
+
+  obfuscation_level: "low"
+  disguise_as: "implementation"
+
+# V1.0 - Codebase-specific injection (preserved)
 target_codebase:
   name: "zed"
   min_version: "0.120.0"

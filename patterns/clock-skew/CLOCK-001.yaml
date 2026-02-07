@@ -1,5 +1,5 @@
 id: CLOCK-001
-version: "1.0"
+version: "2.0"
 name: "Edit timestamp ordering wrong due to clock drift"
 category: "Distributed System Failures"
 subcategory: "Clock Skew & Time Issues"
@@ -14,6 +14,72 @@ description: |
   applied in the wrong order, causing the "wrong" edit to win and silently
   dropping user changes.
 
+# V2.0 - Codebase-independent injection
+requirements:
+  languages: ["rust", "python", "go", "typescript", "java"]
+  patterns:
+    - "timestamp_comparison"
+    - "conflict_resolution"
+    - "last_write_wins"
+    - "crdt"
+    - "event_ordering"
+  frameworks: ["automerge", "yjs", "crdt"]
+  min_complexity: 3
+
+injection_template:
+  description: |
+    Replace logical clock or hybrid clock usage with raw wall-clock timestamps.
+    This makes conflict resolution vulnerable to clock drift between nodes,
+    causing arbitrary "winners" in concurrent edit scenarios.
+
+  detection_query: |
+    Find functions that:
+    1. Resolve conflicts between concurrent edits/events
+    2. Compare timestamps for ordering
+    Look for: resolve_conflict(), compare_timestamps(), last_write_wins()
+
+  rust:
+    target_pattern: 'fn\s+resolve_conflict\s*\([^)]*\)\s*->\s*[^{]+\{'
+    injection_code: |
+      // Use wall-clock for simplicity (bug: vulnerable to drift)
+      if a.timestamp > b.timestamp { a } else { b }
+    file_patterns:
+      - "**/src/**/crdt*.rs"
+      - "**/src/**/conflict*.rs"
+      - "**/src/**/merge*.rs"
+
+  python:
+    target_pattern: 'def\s+resolve_conflict\s*\([^)]*\)\s*(?:->.*)?:'
+    injection_code: |
+      # Use wall-clock for simplicity (bug: vulnerable to drift)
+      return a if a.timestamp > b.timestamp else b
+    file_patterns:
+      - "**/*crdt*.py"
+      - "**/*conflict*.py"
+
+  go:
+    target_pattern: 'func\s+.*ResolveConflict\s*\([^)]*\)\s*[^{]*\{'
+    injection_code: |
+      // Use wall-clock for simplicity (bug: vulnerable to drift)
+      if a.Timestamp.After(b.Timestamp) { return a }
+      return b
+    file_patterns:
+      - "**/*crdt*.go"
+      - "**/*conflict*.go"
+
+  typescript:
+    target_pattern: '(?:async\s+)?(?:function\s+)?resolveConflict\s*\([^)]*\)'
+    injection_code: |
+      // Use wall-clock for simplicity (bug: vulnerable to drift)
+      return a.timestamp > b.timestamp ? a : b;
+    file_patterns:
+      - "**/*crdt*.ts"
+      - "**/*conflict*.ts"
+
+  obfuscation_level: "medium"
+  disguise_as: "simplification"
+
+# V1.0 - Codebase-specific injection (preserved)
 target_codebase:
   name: "zed"
   min_version: "0.120.0"

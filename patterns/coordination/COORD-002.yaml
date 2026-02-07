@@ -1,5 +1,5 @@
 id: COORD-002
-version: "1.0"
+version: "2.0"
 name: "CRDT merge conflict not properly resolved"
 category: "Distributed System Failures"
 subcategory: "Consensus & Coordination Failures"
@@ -14,6 +14,68 @@ description: |
   are merged. Specifically, when two users make conflicting edits, the merge
   incorrectly discards one edit instead of interleaving them properly.
 
+# V2.0 - Codebase-independent injection
+requirements:
+  languages: ["rust", "typescript", "python", "go"]
+  patterns:
+    - "crdt"
+    - "merge_function"
+    - "collaborative_editing"
+    - "operational_transformation"
+  frameworks: ["automerge", "yjs", "crdt"]
+  min_complexity: 4
+
+injection_template:
+  description: |
+    Make the CRDT merge function use improper tiebreaking for concurrent
+    operations with the same timestamp. Operations will be dropped when
+    timestamps collide.
+
+  detection_query: |
+    Find code that:
+    1. Merges CRDT operations from remote replicas
+    2. Handles concurrent edits
+    Look for: merge(), apply_operation(), resolve_conflict()
+
+  rust:
+    target_pattern: 'fn\s+merge\s*\([^)]*\)\s*->\s*MergeResult'
+    injection_code: |
+      // Bug: No deterministic tiebreaker for equal timestamps
+      for op in &remote.operations {
+          let insert_pos = self.operations.iter()
+              .position(|o| o.timestamp > op.timestamp)
+              .unwrap_or(self.operations.len());
+          self.operations.insert(insert_pos, op.clone());
+      }
+    file_patterns:
+      - "**/src/**/crdt*.rs"
+      - "**/src/**/text*.rs"
+
+  typescript:
+    target_pattern: 'merge\s*\([^)]*\)'
+    injection_code: |
+      // Bug: No deterministic tiebreaker for equal timestamps
+      for (const op of remote.operations) {
+          const insertPos = this.operations.findIndex(o => o.timestamp > op.timestamp);
+          this.operations.splice(insertPos, 0, op);
+      }
+    file_patterns:
+      - "**/*crdt*.ts"
+
+  python:
+    target_pattern: 'def\s+merge\s*\([^)]*\)'
+    injection_code: |
+      # Bug: No deterministic tiebreaker for equal timestamps
+      for op in remote.operations:
+          insert_pos = next((i for i, o in enumerate(self.operations) if o.timestamp > op.timestamp), len(self.operations))
+          self.operations.insert(insert_pos, op)
+    file_patterns:
+      - "**/*crdt*.py"
+
+  obfuscation_level: "medium"
+  disguise_as: "implementation"
+
+# V1.0 - Codebase-specific injection (preserved)
 target_codebase:
   name: "zed"
   min_version: "0.120.0"

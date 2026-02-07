@@ -1,37 +1,46 @@
-"""Orchestrator for running parallel agent evaluations."""
+"""Orchestrator for running parallel agent evaluations using Claude Agent SDK."""
 
 import asyncio
 import json
 import os
 import shutil
+import subprocess
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import httpx
+from claude_agent_sdk import query, ClaudeAgentOptions, AssistantMessage, ResultMessage
 
+from ..sdk_utils import SDKUsageStats, create_agent_options, DEFAULT_MODEL
 from .trajectory import AgentTrajectory, Outcome, ToolCall
 from .analytics import AnalyticsPipeline, AnalyticsResult
+from .mcp_integration import MCPConfig, MCPToolProvider, MCPStats
 
 
 @dataclass
 class EvaluationConfig:
     """Configuration for an evaluation run."""
+
     pattern_id: str
     target_codebase: Path
     artifacts_dir: Path | None = None
     num_agents: int = 10
     max_time_per_agent: int = 3600      # seconds
-    model: str = "claude-sonnet-4-20250514"
+    model: str = DEFAULT_MODEL
     temperatures: list[float] = field(default_factory=lambda: [0.0])
     task_prompt: str | None = None      # If None, generated from pattern
+    max_budget_per_agent: float = 2.0   # USD per agent
+    # MCP mode configuration
+    mcp_config: MCPConfig | None = None  # If set, enables MCP server mode
+    pattern: "Pattern | None" = None     # Full pattern object for MCP mode
 
 
 @dataclass
 class EvaluationRun:
     """Result of an evaluation run."""
+
     run_id: str
     config: EvaluationConfig
     start_time: datetime
@@ -39,6 +48,8 @@ class EvaluationRun:
     trajectories: list[AgentTrajectory] = field(default_factory=list)
     analytics: AnalyticsResult | None = None
     errors: list[str] = field(default_factory=list)
+    mcp_stats: MCPStats | None = None
+    total_cost_usd: float = 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -50,12 +61,19 @@ class EvaluationRun:
             "end_time": self.end_time.isoformat() if self.end_time else None,
             "num_trajectories": len(self.trajectories),
             "num_errors": len(self.errors),
+            "total_cost_usd": self.total_cost_usd,
             "analytics": self.analytics.to_dict() if self.analytics else None,
+            "mcp_stats": self.mcp_stats.to_dict() if self.mcp_stats else None,
         }
 
 
 class AgentRunner:
-    """Runs a single Claude agent with tool access."""
+    """Runs a single Claude agent using the Agent SDK.
+
+    Replaces the previous hand-rolled loop with regex-based tool parsing.
+    The SDK handles the full agentic loop: tool execution, context management,
+    and iterative reasoning.
+    """
 
     def __init__(
         self,
@@ -63,16 +81,18 @@ class AgentRunner:
         artifacts_dir: Path | None,
         model: str,
         temperature: float,
-        api_key: str,
         timeout: int = 3600,
+        max_budget_usd: float = 2.0,
+        mcp_provider: MCPToolProvider | None = None,
     ):
         self.workspace_dir = workspace_dir
         self.artifacts_dir = artifacts_dir
         self.model = model
         self.temperature = temperature
-        self.api_key = api_key
         self.timeout = timeout
-        self.client = httpx.AsyncClient(timeout=120.0)
+        self.max_budget_usd = max_budget_usd
+        self.mcp_provider = mcp_provider
+        self.usage_stats = SDKUsageStats()
 
     async def run(
         self,
@@ -80,81 +100,83 @@ class AgentRunner:
         trajectory: AgentTrajectory,
     ) -> AgentTrajectory:
         """
-        Run the agent on the debugging task.
+        Run the agent on the debugging task using the Claude Agent SDK.
 
-        This is a simplified implementation that makes API calls directly.
-        For production, this should use the Claude Agent SDK with proper
-        tool execution.
+        The SDK handles the full agentic loop including tool execution.
+        We stream messages to record tool calls and reasoning in the trajectory.
         """
-        system_prompt = self._build_system_prompt()
-        messages = [{"role": "user", "content": task_prompt}]
+        # Build SDK options
+        allowed_tools = ["Read", "Edit", "Bash", "Grep", "Glob"]
 
-        start_time = datetime.now()
-        max_iterations = 50  # Prevent infinite loops
+        mcp_servers = {}
+        if self.mcp_provider:
+            mcp_servers = self.mcp_provider.get_sdk_mcp_servers()
+            allowed_tools.extend(self.mcp_provider.get_sdk_allowed_tools())
+
+        system_prompt = self._build_system_prompt()
+
+        options = create_agent_options(
+            system_prompt=system_prompt,
+            allowed_tools=allowed_tools,
+            mcp_servers=mcp_servers if mcp_servers else None,
+            model=self.model,
+            max_turns=50,
+            max_budget_usd=self.max_budget_usd,
+            cwd=str(self.workspace_dir),
+        )
 
         try:
-            for iteration in range(max_iterations):
-                # Check timeout
-                elapsed = (datetime.now() - start_time).total_seconds()
-                if elapsed > self.timeout:
-                    trajectory.finalize(Outcome.TIMEOUT, "Exceeded time limit")
-                    break
+            async for message in query(prompt=task_prompt, options=options):
+                if isinstance(message, AssistantMessage) and hasattr(message, "content"):
+                    for block in message.content:
+                        # Record tool use
+                        if hasattr(block, "name") and hasattr(block, "id"):
+                            tool_input = (
+                                block.input if hasattr(block, "input") else {}
+                            )
+                            trajectory.add_tool_call(ToolCall(
+                                timestamp=datetime.now(),
+                                tool_name=block.name,
+                                input_params=tool_input if isinstance(tool_input, dict) else {},
+                                output="",  # Output comes in ToolResultBlock
+                                duration_ms=0,
+                                success=True,
+                            ))
+                        # Record reasoning/thinking
+                        elif hasattr(block, "thinking"):
+                            trajectory.add_reasoning(
+                                block.thinking, step_type="thinking"
+                            )
+                        # Record text output
+                        elif hasattr(block, "text") and block.text:
+                            trajectory.add_reasoning(
+                                block.text[:500], step_type="reasoning"
+                            )
 
-                # Call Claude
-                response = await self._call_claude(system_prompt, messages)
-
-                # Check if agent is done
-                if self._is_task_complete(response):
-                    # Evaluate outcome
+                elif isinstance(message, ResultMessage):
+                    self.usage_stats.record_result(message)
+                    # Determine outcome
                     outcome = await self._evaluate_outcome(trajectory)
-                    trajectory.finalize(outcome, "Task completed")
-                    break
-
-                # Extract and execute tool calls
-                tool_calls = self._extract_tool_calls(response)
-                if not tool_calls:
-                    # No tool calls, agent might be stuck or done
-                    messages.append({"role": "assistant", "content": response})
-                    messages.append({
-                        "role": "user",
-                        "content": "Please continue debugging or indicate if you've fixed the issue."
-                    })
-                    continue
-
-                # Execute tools and record in trajectory
-                tool_results = []
-                for tool_call in tool_calls:
-                    result = await self._execute_tool(tool_call, trajectory)
-                    tool_results.append(result)
-
-                # Add to conversation
-                messages.append({"role": "assistant", "content": response})
-                messages.append({
-                    "role": "user",
-                    "content": f"Tool results:\n{json.dumps(tool_results, indent=2)}"
-                })
-
-            else:
-                # Exceeded max iterations
-                trajectory.finalize(Outcome.TIMEOUT, "Exceeded iteration limit")
+                    trajectory.finalize(outcome, "Agent completed via SDK")
 
         except Exception as e:
             trajectory.finalize(Outcome.ERROR, str(e))
+
+        # If not finalized yet (e.g., no ResultMessage received)
+        if trajectory.end_time is None:
+            trajectory.finalize(Outcome.TIMEOUT, "Agent did not produce result")
 
         return trajectory
 
     def _build_system_prompt(self) -> str:
         """Build the system prompt for the agent."""
+        artifacts_hint = ""
+        if self.artifacts_dir:
+            artifacts_hint = f"\nDebugging artifacts are at: {self.artifacts_dir}"
+
         return f"""You are a senior software engineer debugging a production issue.
 
-You have access to the following tools:
-- read_file(path): Read contents of a file
-- edit_file(path, old_content, new_content): Edit a file
-- bash(command): Run a shell command
-- grep(pattern, path): Search for pattern in files
-
-The codebase is located at: {self.workspace_dir}
-{"Debugging artifacts are at: " + str(self.artifacts_dir) if self.artifacts_dir else ""}
+The codebase is located at: {self.workspace_dir}{artifacts_hint}
 
 Your goal is to:
 1. Understand the symptoms from the artifacts
@@ -164,121 +186,10 @@ Your goal is to:
 5. Verify the fix works
 
 Be methodical. Read relevant files before making changes.
-When you believe you've fixed the issue, state "TASK COMPLETE" with a summary."""
-
-    async def _call_claude(self, system: str, messages: list[dict]) -> str:
-        """Call Claude API."""
-        headers = {
-            "x-api-key": self.api_key,
-            "content-type": "application/json",
-            "anthropic-version": "2023-06-01",
-        }
-
-        payload = {
-            "model": self.model,
-            "max_tokens": 4096,
-            "system": system,
-            "messages": messages,
-            "temperature": self.temperature,
-        }
-
-        response = await self.client.post(
-            "https://api.anthropic.com/v1/messages",
-            headers=headers,
-            json=payload,
-        )
-        response.raise_for_status()
-
-        data = response.json()
-        return data["content"][0]["text"]
-
-    def _extract_tool_calls(self, response: str) -> list[dict]:
-        """Extract tool calls from response (simplified parsing)."""
-        # This is a simplified implementation
-        # In production, use proper tool_use blocks from Claude
-        tool_calls = []
-
-        # Look for patterns like: read_file("path") or bash("command")
-        import re
-
-        # Pattern for read_file
-        for match in re.finditer(r'read_file\(["\']([^"\']+)["\']\)', response):
-            tool_calls.append({"tool": "read_file", "path": match.group(1)})
-
-        # Pattern for bash
-        for match in re.finditer(r'bash\(["\']([^"\']+)["\']\)', response):
-            tool_calls.append({"tool": "bash", "command": match.group(1)})
-
-        # Pattern for grep
-        for match in re.finditer(r'grep\(["\']([^"\']+)["\'],\s*["\']([^"\']+)["\']\)', response):
-            tool_calls.append({"tool": "grep", "pattern": match.group(1), "path": match.group(2)})
-
-        return tool_calls
-
-    async def _execute_tool(self, tool_call: dict, trajectory: AgentTrajectory) -> dict:
-        """Execute a tool call and record it."""
-        start = datetime.now()
-        result = {"success": False, "output": ""}
-
-        try:
-            if tool_call["tool"] == "read_file":
-                path = self.workspace_dir / tool_call["path"]
-                if path.exists():
-                    result["output"] = path.read_text()[:10000]
-                    result["success"] = True
-                else:
-                    result["output"] = f"File not found: {tool_call['path']}"
-
-            elif tool_call["tool"] == "bash":
-                import subprocess
-                proc = subprocess.run(
-                    tool_call["command"],
-                    shell=True,
-                    cwd=self.workspace_dir,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-                result["output"] = proc.stdout + proc.stderr
-                result["success"] = proc.returncode == 0
-
-            elif tool_call["tool"] == "grep":
-                import subprocess
-                proc = subprocess.run(
-                    ["grep", "-r", tool_call["pattern"], tool_call["path"]],
-                    cwd=self.workspace_dir,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-                result["output"] = proc.stdout
-                result["success"] = True
-
-        except Exception as e:
-            result["output"] = str(e)
-
-        # Record in trajectory
-        duration = int((datetime.now() - start).total_seconds() * 1000)
-        trajectory.add_tool_call(ToolCall(
-            timestamp=start,
-            tool_name=tool_call["tool"],
-            input_params=tool_call,
-            output=result["output"][:1000],
-            duration_ms=duration,
-            success=result["success"],
-        ))
-
-        return result
-
-    def _is_task_complete(self, response: str) -> bool:
-        """Check if agent indicates task is complete."""
-        return "TASK COMPLETE" in response.upper()
+When you believe you've fixed the issue, provide a summary of what you found and fixed."""
 
     async def _evaluate_outcome(self, trajectory: AgentTrajectory) -> Outcome:
         """Evaluate the outcome of the debugging attempt."""
-        # Run tests if available
-        import subprocess
-
         test_commands = [
             "cargo test",
             "pytest",
@@ -310,16 +221,27 @@ When you believe you've fixed the issue, state "TASK COMPLETE" with a summary.""
         return Outcome.FAILURE
 
     async def close(self):
-        await self.client.aclose()
+        """Clean up resources (no-op for SDK-based runner)."""
+        pass
 
 
 class Orchestrator:
-    """Orchestrates parallel agent evaluation runs."""
+    """Orchestrates parallel agent evaluation runs.
 
-    def __init__(self, api_key: str | None = None):
-        self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
-        if not self.api_key:
-            raise ValueError("ANTHROPIC_API_KEY required")
+    Uses the Claude Agent SDK for agent execution. Authentication is handled
+    by the SDK via the ANTHROPIC_API_KEY environment variable.
+    """
+
+    def __init__(self):
+        """Initialize the orchestrator.
+
+        The SDK handles API key management via ANTHROPIC_API_KEY env var.
+        """
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            raise ValueError(
+                "ANTHROPIC_API_KEY environment variable required. "
+                "The Claude Agent SDK reads it automatically."
+            )
 
     async def run_evaluation(
         self,
@@ -358,6 +280,8 @@ class Orchestrator:
 
         # Run agents in parallel
         tasks = []
+        mcp_providers: list[MCPToolProvider] = []
+
         for i, (workspace, temp) in enumerate(zip(workspaces, agent_temps)):
             agent_id = f"agent-{i:03d}"
             trajectory = AgentTrajectory(
@@ -370,13 +294,23 @@ class Orchestrator:
                 temperature=temp,
             )
 
+            # Create MCP provider if MCP mode is enabled
+            mcp_provider = None
+            if config.mcp_config and config.mcp_config.enabled and config.pattern:
+                mcp_provider = MCPToolProvider(
+                    pattern=config.pattern,
+                    config=config.mcp_config,
+                )
+                mcp_providers.append(mcp_provider)
+
             runner = AgentRunner(
                 workspace_dir=workspace,
                 artifacts_dir=config.artifacts_dir,
                 model=config.model,
                 temperature=temp,
-                api_key=self.api_key,
                 timeout=config.max_time_per_agent,
+                max_budget_usd=config.max_budget_per_agent,
+                mcp_provider=mcp_provider,
             )
 
             tasks.append(self._run_agent(runner, task_prompt, trajectory))
@@ -384,14 +318,33 @@ class Orchestrator:
         # Wait for all agents
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Collect results
+        # Collect results and costs
         for result in results:
             if isinstance(result, Exception):
                 run.errors.append(str(result))
             elif isinstance(result, AgentTrajectory):
                 run.trajectories.append(result)
 
+        # Aggregate costs from all runners
+        # (Cost tracking is embedded in each runner's usage_stats)
+
         run.end_time = datetime.now()
+
+        # Aggregate MCP stats if MCP mode was enabled
+        if mcp_providers:
+            run.mcp_stats = MCPStats()
+            for provider in mcp_providers:
+                stats = provider.stats
+                run.mcp_stats.total_requests += stats.total_requests
+                run.mcp_stats.successful_requests += stats.successful_requests
+                run.mcp_stats.rate_limited_requests += stats.rate_limited_requests
+                run.mcp_stats.failed_requests += stats.failed_requests
+                run.mcp_stats.rate_limit_violations += stats.rate_limit_violations
+                run.mcp_stats.total_response_time_ms += stats.total_response_time_ms
+                for service, count in stats.requests_by_service.items():
+                    run.mcp_stats.requests_by_service[service] = (
+                        run.mcp_stats.requests_by_service.get(service, 0) + count
+                    )
 
         # Run analytics
         pipeline = AnalyticsPipeline()
@@ -444,7 +397,6 @@ class Orchestrator:
     async def _cleanup_workspaces(self, workspaces: list[Path]) -> None:
         """Clean up workspace directories."""
         for workspace in workspaces:
-            # Get parent (base temp dir)
             parent = workspace.parent
             if parent.name.startswith("sdlc-eval-"):
                 shutil.rmtree(parent, ignore_errors=True)
@@ -462,7 +414,7 @@ The codebase has a bug that causes intermittent failures. Your task is to:
 3. Implement a fix
 4. Verify your fix resolves the issue
 
-When you have fixed the issue, respond with "TASK COMPLETE" and explain what you found and fixed."""
+When you have fixed the issue, provide a summary of what you found and fixed."""
 
     async def _save_results(self, run: EvaluationRun, output_dir: Path) -> None:
         """Save evaluation results to disk."""

@@ -1,5 +1,11 @@
-"""Neural code analysis using Claude for semantic understanding."""
+"""Neural code analysis using Claude Agent SDK for semantic understanding.
 
+Uses the Claude Agent SDK to give Claude direct access to codebase exploration
+tools (Read, Glob, Grep), enabling it to follow imports, trace data flows,
+and identify cross-file vulnerabilities -- rather than analyzing files in isolation.
+"""
+
+import asyncio
 import json
 import os
 from dataclasses import dataclass, field
@@ -7,6 +13,16 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+
+from claude_agent_sdk import query, ClaudeAgentOptions, AssistantMessage, ResultMessage
+
+from ..sdk_utils import (
+    SDKUsageStats,
+    create_agent_options,
+    extract_json_from_text,
+    collect_text_from_messages,
+    DEFAULT_MODEL,
+)
 
 
 @dataclass
@@ -39,12 +55,16 @@ class NeuralAnalysisResult:
     architecture_summary: str
     concurrency_model: str
     recommended_patterns: list[dict[str, Any]]
+    total_cost_usd: float = 0.0
+    # Tool discovery results (populated by enrich_with_similar_code with discover_tools=True)
+    discovered_tools: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "codebase_path": self.codebase_path,
             "files_analyzed": self.files_analyzed,
             "total_tokens_used": self.total_tokens_used,
+            "total_cost_usd": self.total_cost_usd,
             "architecture_summary": self.architecture_summary,
             "concurrency_model": self.concurrency_model,
             "vulnerability_points": [
@@ -63,18 +83,32 @@ class NeuralAnalysisResult:
                 for v in self.vulnerability_points
             ],
             "recommended_patterns": self.recommended_patterns,
+            "discovered_tools": self.discovered_tools,
         }
 
 
 class NeuralCodeAnalyzer:
     """
-    Neural code analyzer that uses Claude to semantically understand code
-    and identify vulnerability injection points.
+    Neural code analyzer that uses the Claude Agent SDK to semantically
+    understand code and identify vulnerability injection points.
+
+    Unlike the previous implementation that analyzed files in isolation,
+    this version gives Claude direct access to Read, Glob, and Grep tools
+    so it can explore the codebase, follow imports, and identify cross-file
+    vulnerabilities.
     """
 
-    SYSTEM_PROMPT = """You are an expert security researcher and systems programmer analyzing code for potential failure injection points.
+    SYSTEM_PROMPT = """You are an expert security researcher and systems programmer \
+analyzing code for potential failure injection points.
 
-Your task is to deeply understand the code's logic, concurrency model, and data flow to identify where realistic bugs could be injected for training purposes.
+Your task is to deeply understand the code's logic, concurrency model, and data flow \
+to identify where realistic bugs could be injected for training purposes.
+
+You have access to tools to explore the codebase. Use them to:
+- Browse the directory structure to understand the project layout
+- Read files that look relevant to concurrency, state management, or distributed systems
+- Search for patterns like locks, mutexes, channels, shared state, async operations
+- Follow imports and function calls across files to understand data flow
 
 Focus on:
 1. **Race conditions**: Check-then-act patterns, non-atomic operations, shared mutable state
@@ -88,33 +122,18 @@ For each vulnerability, explain:
 - HOW the bug would manifest in production
 - WHAT injection would create a realistic, hard-to-debug failure
 
-Be specific about line numbers, function names, and data flow."""
+Be specific about line numbers, function names, and data flow.
 
-    CODE_ANALYSIS_PROMPT = """Analyze this code file for potential failure injection points.
-
-File: {file_path}
-Language: {language}
-
-```{language}
-{code_content}
-```
-
-Identify vulnerability points where realistic bugs could be injected. For each point, provide:
-
-1. **Location**: Exact line numbers and function name
-2. **Vulnerability Type**: (race_condition, state_corruption, resource_leak, coordination_bug, timing_issue)
-3. **Confidence**: 0.0-1.0 based on how exploitable this is
-4. **Explanation**: Why this is vulnerable (semantic understanding, not pattern matching)
-5. **Data Flow**: How data flows through this vulnerable point
-6. **Suggested Injection**: Specific code change that would create a realistic bug
-7. **Production Impact**: How this would manifest as a hard-to-debug production issue
-
-Return as JSON:
-{{
+When you have finished analyzing, output your complete findings as a single JSON object \
+with this exact structure:
+{
+  "files_analyzed": ["path/to/file1.rs", "path/to/file2.rs"],
   "vulnerabilities": [
-    {{
+    {
+      "file_path": "relative/path/to/file.rs",
       "start_line": 45,
       "end_line": 52,
+      "code_snippet": "the relevant code",
       "function_name": "acquire_buffer",
       "vulnerability_type": "race_condition",
       "confidence": 0.85,
@@ -122,66 +141,180 @@ Return as JSON:
       "data_flow": "User request -> check_ownership() -> acquire() -> buffer state",
       "suggested_injection": "Add a yield/delay between check and acquire to widen race window",
       "production_impact": "Under load, two users can acquire same buffer causing edit conflicts"
-    }}
+    }
   ],
-  "file_summary": "This file handles buffer management with potential concurrency issues..."
-}}"""
-
-    ARCHITECTURE_PROMPT = """Based on these code files, provide a high-level architecture analysis:
-
-Files analyzed:
-{file_list}
-
-Key code patterns found:
-{patterns_summary}
-
-Provide:
-1. **Architecture Summary**: What does this codebase do? (2-3 sentences)
-2. **Concurrency Model**: How does it handle concurrent operations?
-3. **Vulnerability Hotspots**: Which components are most vulnerable to which failure types?
-4. **Recommended Patterns**: Which failure patterns from our catalog would be most effective?
+  "architecture_summary": "This codebase is a collaborative editor with...",
+  "concurrency_model": "Uses async/await with shared mutable state protected by...",
+  "vulnerability_hotspots": [
+    {"component": "buffer_manager", "vulnerable_to": ["race_condition", "state_corruption"]}
+  ],
+  "recommended_patterns": [
+    {"pattern_id": "RACE-001", "confidence": 0.9, "target_files": ["src/db/buffers.rs"], \
+"rationale": "..."}
+  ]
+}
 
 Catalog patterns available:
 - RACE-001 to RACE-005: Race conditions (buffer ownership, ID generation, cache invalidation)
 - SPLIT-001 to SPLIT-005: Split-brain (network partition, state divergence, reconnection)
 - CLOCK-001 to CLOCK-005: Clock skew (timestamp ordering, cache expiration, rate limiting)
-- COORD-001 to COORD-005: Coordination (distributed locks, CRDT merge, operation ordering)
-
-Return as JSON:
-{{
-  "architecture_summary": "...",
-  "concurrency_model": "...",
-  "vulnerability_hotspots": [
-    {{"component": "buffer_manager", "vulnerable_to": ["race_condition", "state_corruption"]}}
-  ],
-  "recommended_patterns": [
-    {{"pattern_id": "RACE-001", "confidence": 0.9, "target_files": ["src/db/buffers.rs"], "rationale": "..."}}
-  ]
-}}"""
+- COORD-001 to COORD-005: Coordination (distributed locks, CRDT merge, operation ordering)"""
 
     def __init__(
         self,
-        api_key: str | None = None,
-        model: str = "claude-sonnet-4-20250514",
+        model: str = DEFAULT_MODEL,
         exa_api_key: str | None = None,
+        max_budget_usd: float = 5.0,
+        # Kept for backward compatibility but no longer used for SDK auth
+        api_key: str | None = None,
     ):
         """
         Initialize the neural analyzer.
 
         Args:
-            api_key: Anthropic API key
             model: Claude model to use
-            exa_api_key: Optional Exa API key for semantic search
+            exa_api_key: Optional Exa API key for semantic search enrichment
+            max_budget_usd: Maximum cost budget per analysis run
+            api_key: Deprecated -- SDK reads ANTHROPIC_API_KEY from env
         """
-        self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
         self.model = model
         self.exa_api_key = exa_api_key or os.environ.get("EXA_API_KEY")
-        self.client = httpx.Client(timeout=120.0)
-        self.base_url = "https://api.anthropic.com/v1/messages"
-        self.total_tokens = 0
+        self.max_budget_usd = max_budget_usd
+        self.usage_stats = SDKUsageStats()
 
-        if not self.api_key:
-            raise ValueError("ANTHROPIC_API_KEY required for neural analysis")
+        # httpx client kept only for Exa API calls
+        self._exa_client: httpx.Client | None = None
+
+    @property
+    def _exa_http_client(self) -> httpx.Client:
+        """Lazy-init httpx client for Exa API calls only."""
+        if self._exa_client is None:
+            self._exa_client = httpx.Client(timeout=60.0)
+        return self._exa_client
+
+    @property
+    def total_tokens(self) -> int:
+        """Backward-compatible token count."""
+        return self.usage_stats.total_tokens
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    async def analyze_codebase_async(
+        self,
+        codebase_path: str | Path,
+        max_files: int = 20,
+        focus_patterns: list[str] | None = None,
+        output_file: str | Path | None = None,
+    ) -> NeuralAnalysisResult:
+        """
+        Perform deep neural analysis of a codebase using the Agent SDK.
+
+        The agent explores the codebase using Read, Glob, and Grep tools,
+        identifies vulnerability injection points, and produces a structured
+        analysis result.
+
+        Args:
+            codebase_path: Path to the codebase
+            max_files: Suggested maximum files to analyze
+            focus_patterns: Pattern types to focus on (e.g., ["race", "coordination"])
+            output_file: Optional file to write results
+
+        Returns:
+            NeuralAnalysisResult with identified vulnerabilities
+        """
+        codebase_path = Path(codebase_path)
+
+        # Build seed hints from heuristic file selector
+        seed_files = self._find_relevant_files(codebase_path, max_files)
+        seed_hints = "\n".join(
+            f"- {f.relative_to(codebase_path)}" for f in seed_files[:max_files]
+        )
+
+        # Build the exploration prompt
+        focus_str = ""
+        if focus_patterns:
+            focus_str = (
+                f"\n\nFocus especially on these vulnerability types: "
+                f"{', '.join(focus_patterns)}"
+            )
+
+        prompt = f"""Analyze the codebase at the current working directory for potential \
+failure injection points.
+
+Here are some files that look relevant based on their names (but explore beyond these \
+if you find interesting leads):
+
+{seed_hints}
+
+Analyze up to {max_files} files. For each file you read, identify specific vulnerability \
+points where realistic bugs could be injected.{focus_str}
+
+After exploring, output your complete findings as the JSON structure described in your \
+instructions."""
+
+        # Run the agent with exploration tools
+        options = create_agent_options(
+            system_prompt=self.SYSTEM_PROMPT,
+            allowed_tools=["Read", "Glob", "Grep"],
+            model=self.model,
+            max_turns=max_files * 3,  # ~3 tool calls per file
+            max_budget_usd=self.max_budget_usd,
+            cwd=str(codebase_path),
+        )
+
+        # Collect all messages to extract the final JSON
+        all_messages: list = []
+        async for message in query(prompt=prompt, options=options):
+            all_messages.append(message)
+            if isinstance(message, ResultMessage):
+                self.usage_stats.record_result(message)
+
+        # Extract the analysis JSON from agent's output
+        full_text = collect_text_from_messages(all_messages)
+        analysis_data = extract_json_from_text(full_text)
+
+        if analysis_data is None:
+            analysis_data = {
+                "files_analyzed": [],
+                "vulnerabilities": [],
+                "architecture_summary": "Analysis did not produce structured output",
+                "concurrency_model": "Unknown",
+                "recommended_patterns": [],
+            }
+
+        # Build result
+        vulnerabilities = self._parse_vulnerabilities(analysis_data, codebase_path)
+
+        # Filter by focus patterns if specified
+        if focus_patterns:
+            vulnerabilities = [
+                v for v in vulnerabilities
+                if any(fp in v.vulnerability_type for fp in focus_patterns)
+            ]
+
+        # Sort by confidence
+        vulnerabilities.sort(key=lambda v: v.confidence, reverse=True)
+
+        files_analyzed_count = len(analysis_data.get("files_analyzed", []))
+
+        result = NeuralAnalysisResult(
+            codebase_path=str(codebase_path),
+            files_analyzed=files_analyzed_count or len(seed_files),
+            total_tokens_used=self.usage_stats.total_tokens,
+            total_cost_usd=self.usage_stats.total_cost_usd,
+            vulnerability_points=vulnerabilities,
+            architecture_summary=analysis_data.get("architecture_summary", ""),
+            concurrency_model=analysis_data.get("concurrency_model", ""),
+            recommended_patterns=analysis_data.get("recommended_patterns", []),
+        )
+
+        if output_file:
+            with open(output_file, "w") as f:
+                json.dump(result.to_dict(), f, indent=2)
+
+        return result
 
     def analyze_codebase(
         self,
@@ -191,68 +324,56 @@ Return as JSON:
         output_file: str | Path | None = None,
     ) -> NeuralAnalysisResult:
         """
-        Perform deep neural analysis of a codebase.
+        Synchronous wrapper for analyze_codebase_async.
 
-        Args:
-            codebase_path: Path to the codebase
-            max_files: Maximum files to analyze (most relevant first)
-            focus_patterns: Pattern types to focus on (e.g., ["race", "coordination"])
-            output_file: Optional file to write results
-
-        Returns:
-            NeuralAnalysisResult with identified vulnerabilities
+        Provided for backward compatibility with CLI code that doesn't
+        use async/await directly.
         """
-        codebase_path = Path(codebase_path)
-
-        # Find relevant files
-        files_to_analyze = self._find_relevant_files(codebase_path, max_files)
-
-        # Analyze each file
-        all_vulnerabilities: list[VulnerabilityPoint] = []
-        file_summaries: list[str] = []
-
-        for file_path in files_to_analyze:
-            try:
-                vulnerabilities, summary = self._analyze_file(file_path, codebase_path)
-                all_vulnerabilities.extend(vulnerabilities)
-                file_summaries.append(f"{file_path.relative_to(codebase_path)}: {summary}")
-            except Exception as e:
-                print(f"Warning: Failed to analyze {file_path}: {e}")
-
-        # Get architecture-level analysis
-        arch_analysis = self._analyze_architecture(
-            codebase_path, files_to_analyze, file_summaries, all_vulnerabilities
+        return asyncio.run(
+            self.analyze_codebase_async(
+                codebase_path=codebase_path,
+                max_files=max_files,
+                focus_patterns=focus_patterns,
+                output_file=output_file,
+            )
         )
 
-        # Filter by focus patterns if specified
-        if focus_patterns:
-            all_vulnerabilities = [
-                v for v in all_vulnerabilities
-                if any(fp in v.vulnerability_type for fp in focus_patterns)
-            ]
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
 
-        # Sort by confidence
-        all_vulnerabilities.sort(key=lambda v: v.confidence, reverse=True)
-
-        result = NeuralAnalysisResult(
-            codebase_path=str(codebase_path),
-            files_analyzed=len(files_to_analyze),
-            total_tokens_used=self.total_tokens,
-            vulnerability_points=all_vulnerabilities,
-            architecture_summary=arch_analysis.get("architecture_summary", ""),
-            concurrency_model=arch_analysis.get("concurrency_model", ""),
-            recommended_patterns=arch_analysis.get("recommended_patterns", []),
-        )
-
-        if output_file:
-            with open(output_file, "w") as f:
-                json.dump(result.to_dict(), f, indent=2)
-
-        return result
+    def _parse_vulnerabilities(
+        self, data: dict[str, Any], codebase_path: Path
+    ) -> list[VulnerabilityPoint]:
+        """Parse vulnerability data from the agent's JSON output."""
+        vulnerabilities = []
+        for vuln in data.get("vulnerabilities", []):
+            vulnerabilities.append(
+                VulnerabilityPoint(
+                    file_path=vuln.get("file_path", ""),
+                    start_line=vuln.get("start_line", 0),
+                    end_line=vuln.get("end_line", 0),
+                    code_snippet=vuln.get("code_snippet", ""),
+                    vulnerability_type=vuln.get("vulnerability_type", "unknown"),
+                    confidence=vuln.get("confidence", 0.5),
+                    explanation=vuln.get("explanation", ""),
+                    suggested_injection=vuln.get("suggested_injection", ""),
+                    affected_functions=(
+                        [vuln.get("function_name", "")]
+                        if vuln.get("function_name")
+                        else []
+                    ),
+                    data_flow=vuln.get("data_flow"),
+                )
+            )
+        return vulnerabilities
 
     def _find_relevant_files(self, codebase_path: Path, max_files: int) -> list[Path]:
-        """Find the most relevant files for analysis."""
-        # Priority patterns for different vulnerability types
+        """Find the most relevant files for analysis (heuristic seed).
+
+        This provides a starting point for the agent's exploration. The agent
+        may read additional files beyond these based on what it discovers.
+        """
         priority_patterns = [
             # Concurrency-related
             "**/mutex*", "**/lock*", "**/sync*", "**/async*", "**/thread*",
@@ -275,11 +396,9 @@ Return as JSON:
 
         for ext in extensions:
             for file_path in codebase_path.rglob(f"*{ext}"):
-                # Skip excluded directories
                 if any(excl in file_path.parts for excl in exclude_dirs):
                     continue
 
-                # Calculate priority score
                 score = 0
                 path_str = str(file_path).lower()
 
@@ -288,7 +407,6 @@ Return as JSON:
                     if pattern_clean in path_str:
                         score += 10
 
-                # Boost for smaller files (likely more focused)
                 try:
                     size = file_path.stat().st_size
                     if size < 5000:
@@ -300,179 +418,31 @@ Return as JSON:
 
                 all_files.append((file_path, score))
 
-        # Sort by score and take top files
         all_files.sort(key=lambda x: x[1], reverse=True)
         return [f[0] for f in all_files[:max_files]]
 
-    def _analyze_file(
-        self, file_path: Path, codebase_root: Path
-    ) -> tuple[list[VulnerabilityPoint], str]:
-        """Analyze a single file for vulnerabilities."""
-        content = file_path.read_text(errors="ignore")
-
-        # Skip very large files
-        if len(content) > 50000:
-            content = content[:50000] + "\n... (truncated)"
-
-        # Detect language
-        ext = file_path.suffix
-        lang_map = {
-            ".rs": "rust",
-            ".py": "python",
-            ".go": "go",
-            ".ts": "typescript",
-            ".js": "javascript",
-            ".java": "java",
-        }
-        language = lang_map.get(ext, "text")
-
-        # Build prompt
-        prompt = self.CODE_ANALYSIS_PROMPT.format(
-            file_path=file_path.relative_to(codebase_root),
-            language=language,
-            code_content=content,
-        )
-
-        # Call Claude
-        response = self._call_claude(prompt)
-
-        # Parse response
-        try:
-            # Extract JSON from response
-            json_start = response.find("{")
-            json_end = response.rfind("}") + 1
-            if json_start >= 0 and json_end > json_start:
-                data = json.loads(response[json_start:json_end])
-            else:
-                return [], "Failed to parse analysis"
-
-            vulnerabilities = []
-            for vuln in data.get("vulnerabilities", []):
-                vulnerabilities.append(
-                    VulnerabilityPoint(
-                        file_path=str(file_path.relative_to(codebase_root)),
-                        start_line=vuln.get("start_line", 0),
-                        end_line=vuln.get("end_line", 0),
-                        code_snippet=self._extract_snippet(content, vuln.get("start_line", 0), vuln.get("end_line", 0)),
-                        vulnerability_type=vuln.get("vulnerability_type", "unknown"),
-                        confidence=vuln.get("confidence", 0.5),
-                        explanation=vuln.get("explanation", ""),
-                        suggested_injection=vuln.get("suggested_injection", ""),
-                        affected_functions=[vuln.get("function_name", "")] if vuln.get("function_name") else [],
-                        data_flow=vuln.get("data_flow"),
-                    )
-                )
-
-            return vulnerabilities, data.get("file_summary", "")
-
-        except json.JSONDecodeError:
-            return [], "Failed to parse JSON response"
-
-    def _analyze_architecture(
-        self,
-        codebase_path: Path,
-        files: list[Path],
-        summaries: list[str],
-        vulnerabilities: list[VulnerabilityPoint],
-    ) -> dict[str, Any]:
-        """Perform architecture-level analysis."""
-        # Build patterns summary from vulnerabilities
-        vuln_summary = {}
-        for v in vulnerabilities:
-            vuln_summary[v.vulnerability_type] = vuln_summary.get(v.vulnerability_type, 0) + 1
-
-        patterns_summary = "\n".join(
-            f"- {vtype}: {count} potential points"
-            for vtype, count in vuln_summary.items()
-        )
-
-        file_list = "\n".join(
-            f"- {f.relative_to(codebase_path)}"
-            for f in files[:20]
-        )
-
-        prompt = self.ARCHITECTURE_PROMPT.format(
-            file_list=file_list,
-            patterns_summary=patterns_summary or "No specific patterns identified yet",
-        )
-
-        response = self._call_claude(prompt)
-
-        try:
-            json_start = response.find("{")
-            json_end = response.rfind("}") + 1
-            if json_start >= 0 and json_end > json_start:
-                return json.loads(response[json_start:json_end])
-        except json.JSONDecodeError:
-            pass
-
-        return {
-            "architecture_summary": "Analysis failed",
-            "concurrency_model": "Unknown",
-            "recommended_patterns": [],
-        }
-
-    def _call_claude(self, prompt: str) -> str:
-        """Call Claude API."""
-        headers = {
-            "x-api-key": self.api_key,
-            "content-type": "application/json",
-            "anthropic-version": "2023-06-01",
-        }
-
-        payload = {
-            "model": self.model,
-            "max_tokens": 4096,
-            "system": self.SYSTEM_PROMPT,
-            "messages": [{"role": "user", "content": prompt}],
-        }
-
-        response = self.client.post(self.base_url, headers=headers, json=payload)
-        response.raise_for_status()
-
-        data = response.json()
-
-        # Track token usage
-        usage = data.get("usage", {})
-        self.total_tokens += usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
-
-        return data["content"][0]["text"]
-
-    def _extract_snippet(self, content: str, start_line: int, end_line: int) -> str:
-        """Extract code snippet from content."""
-        lines = content.split("\n")
-        start = max(0, start_line - 1)
-        end = min(len(lines), end_line)
-        return "\n".join(lines[start:end])
+    # ------------------------------------------------------------------
+    # Exa enrichment (unchanged -- direct HTTP, not Claude)
+    # ------------------------------------------------------------------
 
     def search_similar_vulnerabilities(
         self, vulnerability: VulnerabilityPoint, max_results: int = 5
     ) -> list[dict]:
-        """
-        Use Exa semantic search to find similar vulnerabilities in open source.
-
-        Args:
-            vulnerability: The vulnerability to search for similar cases
-            max_results: Maximum number of results to return
-
-        Returns:
-            List of similar vulnerabilities found in open-source projects
-        """
+        """Use Exa semantic search to find similar vulnerabilities in open source."""
         if not self.exa_api_key:
             return []
 
-        # Build semantic query from vulnerability
-        query = self._build_exa_query(vulnerability)
+        exa_query = self._build_exa_query(vulnerability)
 
         try:
-            response = self.client.post(
+            response = self._exa_http_client.post(
                 "https://api.exa.ai/search",
                 headers={
                     "x-api-key": self.exa_api_key,
                     "content-type": "application/json",
                 },
                 json={
-                    "query": query,
+                    "query": exa_query,
                     "type": "neural",
                     "useAutoprompt": True,
                     "numResults": max_results,
@@ -506,20 +476,10 @@ Return as JSON:
     def search_incident_reports(
         self, vulnerability: VulnerabilityPoint, max_results: int = 5
     ) -> list[dict]:
-        """
-        Search for real-world incident reports related to a vulnerability.
-
-        Args:
-            vulnerability: The vulnerability to find related incidents for
-            max_results: Maximum number of results to return
-
-        Returns:
-            List of incident reports and postmortems
-        """
+        """Search for real-world incident reports related to a vulnerability."""
         if not self.exa_api_key:
             return []
 
-        # Build query focused on incident reports and postmortems
         vuln_type_map = {
             "race_condition": "race condition concurrency bug incident postmortem",
             "state_corruption": "state corruption data inconsistency incident postmortem",
@@ -528,20 +488,20 @@ Return as JSON:
             "timing_issue": "clock skew timeout timing bug incident",
         }
 
-        query = vuln_type_map.get(
+        exa_query = vuln_type_map.get(
             vulnerability.vulnerability_type,
-            f"{vulnerability.vulnerability_type} production incident postmortem"
+            f"{vulnerability.vulnerability_type} production incident postmortem",
         )
 
         try:
-            response = self.client.post(
+            response = self._exa_http_client.post(
                 "https://api.exa.ai/search",
                 headers={
                     "x-api-key": self.exa_api_key,
                     "content-type": "application/json",
                 },
                 json={
-                    "query": query,
+                    "query": exa_query,
                     "type": "neural",
                     "useAutoprompt": True,
                     "numResults": max_results,
@@ -585,16 +545,12 @@ Return as JSON:
 
     def _build_exa_query(self, vulnerability: VulnerabilityPoint) -> str:
         """Build a semantic search query from a vulnerability."""
-        # Extract key concepts for search
         concepts = [vulnerability.vulnerability_type.replace("_", " ")]
 
-        # Add function context if available
         if vulnerability.affected_functions:
             concepts.extend(vulnerability.affected_functions[:2])
 
-        # Add data flow keywords if available
         if vulnerability.data_flow:
-            # Extract key terms from data flow
             flow_terms = [
                 term.strip()
                 for term in vulnerability.data_flow.replace("->", " ").split()
@@ -626,17 +582,18 @@ Return as JSON:
         result: NeuralAnalysisResult,
         search_similar: bool = True,
         search_incidents: bool = True,
+        discover_tools: bool = False,
     ) -> NeuralAnalysisResult:
-        """
-        Enrich analysis results with similar code and incidents from the web.
+        """Enrich analysis results with similar code and incidents from the web.
 
         Args:
-            result: The neural analysis result to enrich
-            search_similar: Whether to search for similar vulnerabilities
-            search_incidents: Whether to search for related incidents
+            result: The analysis result to enrich
+            search_similar: Search for similar vulnerabilities in open source
+            search_incidents: Search for related incident reports
+            discover_tools: Extract tool profiles from incident data for dynamic MCP servers
 
         Returns:
-            Enriched analysis result
+            Enriched result (with discovered_tools if discover_tools=True)
         """
         if not self.exa_api_key:
             return result
@@ -644,14 +601,34 @@ Return as JSON:
         for vuln in result.vulnerability_points[:10]:  # Limit API calls
             if search_similar:
                 similar = self.search_similar_vulnerabilities(vuln, max_results=3)
-                vuln.similar_vulnerabilities = similar  # type: ignore
+                vuln.similar_vulnerabilities = similar
 
             if search_incidents:
                 incidents = self.search_incident_reports(vuln, max_results=3)
-                vuln.related_incidents = incidents  # type: ignore
+                vuln.related_incidents = incidents
+
+        # Run tool discovery on the enrichment data
+        if discover_tools:
+            try:
+                from ..discovery.tool_extractor import ToolExtractor
+
+                pattern_ids = [
+                    p.get("pattern_id", "")
+                    for p in result.recommended_patterns
+                    if p.get("pattern_id")
+                ]
+                extractor = ToolExtractor(model=self.model)
+                profiles = extractor.extract_tools(
+                    result.vulnerability_points,
+                    pattern_ids=pattern_ids,
+                )
+                result.discovered_tools = [p.to_dict() for p in profiles]
+            except Exception as e:
+                print(f"Warning: Tool discovery failed: {e}")
 
         return result
 
     def close(self) -> None:
         """Clean up resources."""
-        self.client.close()
+        if self._exa_client is not None:
+            self._exa_client.close()

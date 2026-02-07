@@ -1469,13 +1469,13 @@ def mcp_server(
                 return
 
             service = path_parts[0]
-            endpoint = "/".join(path_parts[1:])
+            endpoint = "/" + "/".join(path_parts[1:])
 
             # Parse query parameters
             params = dict(urllib.parse.parse_qsl(parsed.query))
 
             # Make request through registry
-            response = registry.make_request(service, endpoint, params)
+            response = registry.make_request(service, "GET", endpoint, params)
 
             # Send response
             self.send_response(response.status)

@@ -92,7 +92,7 @@ class SchemaGenerator:
     what endpoints would be useful for incident debugging.
     """
 
-    def __init__(self, model: str = "claude-sonnet-4-20250514"):
+    def __init__(self, model: str = "claude-opus-4-20250514"):
         self.model = model
 
     async def generate_config_async(

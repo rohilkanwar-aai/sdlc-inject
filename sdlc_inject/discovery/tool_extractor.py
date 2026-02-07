@@ -70,7 +70,7 @@ class ToolExtractor:
     tools/services were mentioned.
     """
 
-    def __init__(self, model: str = "claude-sonnet-4-20250514"):
+    def __init__(self, model: str = "claude-opus-4-20250514"):
         self.model = model
 
     async def extract_tools_async(

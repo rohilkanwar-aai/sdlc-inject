@@ -97,7 +97,7 @@ class AgentTrajectory:
     end_time: datetime | None = None
 
     # Agent config
-    model: str = "claude-sonnet-4-20250514"
+    model: str = "claude-opus-4-20250514"
     temperature: float = 0.0
 
     # Trajectory data
@@ -237,7 +237,7 @@ class AgentTrajectory:
             pattern_id=data["pattern_id"],
             run_id=data["run_id"],
             start_time=datetime.fromisoformat(data["start_time"]),
-            model=data.get("model", "claude-sonnet-4-20250514"),
+            model=data.get("model", "claude-opus-4-20250514"),
             temperature=data.get("temperature", 0.0),
         )
 

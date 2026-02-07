@@ -52,7 +52,7 @@ class TestCreateAgentOptions:
         options = create_agent_options(
             system_prompt="Test prompt",
             allowed_tools=["Read", "Grep"],
-            model="claude-sonnet-4-20250514",
+            model="claude-opus-4-20250514",
             max_turns=10,
             cwd="/tmp/test",
         )

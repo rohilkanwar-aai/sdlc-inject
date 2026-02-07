@@ -12,7 +12,7 @@ from claude_agent_sdk import ClaudeAgentOptions, AssistantMessage, ResultMessage
 
 
 # Default model used across the codebase
-DEFAULT_MODEL = "claude-sonnet-4-20250514"
+DEFAULT_MODEL = "claude-opus-4-20250514"
 
 
 @dataclass

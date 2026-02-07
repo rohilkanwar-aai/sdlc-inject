@@ -15,7 +15,7 @@ class TestNeuralCodeAnalyzerInit:
 
     def test_default_init(self):
         analyzer = NeuralCodeAnalyzer()
-        assert analyzer.model == "claude-sonnet-4-20250514"
+        assert analyzer.model == "claude-opus-4-20250514"
         assert analyzer.total_tokens == 0
 
     def test_custom_model(self):

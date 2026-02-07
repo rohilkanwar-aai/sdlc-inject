@@ -194,33 +194,6 @@ TAGS:
             tags=tags,
         )
 
-    def batch_summarize(
-        self,
-        incidents: list[dict],
-        pattern_type: str,
-    ) -> list[IncidentSummary]:
-        """
-        Summarize multiple incidents.
-
-        Args:
-            incidents: List of incident dicts with url, title, snippet
-            pattern_type: Type of pattern
-
-        Returns:
-            List of IncidentSummary objects
-        """
-        summaries = []
-        for incident in incidents:
-            summary = self.summarize_incident(
-                url=incident["url"],
-                title=incident.get("title", ""),
-                snippet=incident.get("snippet", ""),
-                pattern_type=pattern_type,
-            )
-            if summary:
-                summaries.append(summary)
-        return summaries
-
     def close(self) -> None:
         """Close the HTTP client."""
         self.client.close()

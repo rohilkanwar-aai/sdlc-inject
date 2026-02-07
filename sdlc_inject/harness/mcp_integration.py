@@ -735,25 +735,3 @@ class MCPToolProvider:
         return max(0.8, 1.0 - penalty)
 
 
-def get_mcp_system_prompt_addition(tools: list[dict]) -> str:
-    """Generate the system prompt addition for MCP tools."""
-    tool_descriptions = []
-    for t in tools:
-        params = t["input_schema"].get("properties", {})
-        param_str = ", ".join(f"{k}: {v.get('type', 'any')}" for k, v in params.items())
-        tool_descriptions.append(f"- {t['name']}({param_str}): {t['description']}")
-
-    return f"""
-You also have access to observability and incident management tools:
-
-{chr(10).join(tool_descriptions)}
-
-Use these tools to gather information about the incident:
-- Check Sentry for error reports and stack traces
-- Review Slack incident channels for context from other engineers
-- Look at GitHub for related issues, PRs, and recent commits
-- Check PagerDuty for alert timelines
-- Query Prometheus for metrics anomalies
-
-Be mindful of rate limits - the APIs have limits on requests per minute.
-"""

@@ -5,13 +5,14 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from claude_agent_sdk import query, ClaudeAgentOptions, AssistantMessage, ResultMessage
+from claude_agent_sdk import query, AssistantMessage, ResultMessage
 
 from ..sdk_utils import SDKUsageStats, create_agent_options, DEFAULT_MODEL
 from .trajectory import AgentTrajectory, Outcome, ToolCall
@@ -280,6 +281,7 @@ class Orchestrator:
 
         # Run agents in parallel
         tasks = []
+        runners: list[AgentRunner] = []
         mcp_providers: list[MCPToolProvider] = []
 
         for i, (workspace, temp) in enumerate(zip(workspaces, agent_temps)):
@@ -312,13 +314,14 @@ class Orchestrator:
                 max_budget_usd=config.max_budget_per_agent,
                 mcp_provider=mcp_provider,
             )
+            runners.append(runner)
 
             tasks.append(self._run_agent(runner, task_prompt, trajectory))
 
         # Wait for all agents
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Collect results and costs
+        # Collect results
         for result in results:
             if isinstance(result, Exception):
                 run.errors.append(str(result))
@@ -326,7 +329,8 @@ class Orchestrator:
                 run.trajectories.append(result)
 
         # Aggregate costs from all runners
-        # (Cost tracking is embedded in each runner's usage_stats)
+        for runner in runners:
+            run.total_cost_usd += runner.usage_stats.total_cost_usd
 
         run.end_time = datetime.now()
 
@@ -382,8 +386,6 @@ class Orchestrator:
         run_id: str,
     ) -> list[Path]:
         """Create isolated workspace copies for each agent."""
-        import tempfile
-
         base_temp = Path(tempfile.mkdtemp(prefix=f"sdlc-eval-{run_id}-"))
         workspaces = []
 

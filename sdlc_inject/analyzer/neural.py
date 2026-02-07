@@ -14,7 +14,7 @@ from typing import Any
 
 import httpx
 
-from claude_agent_sdk import query, ClaudeAgentOptions, AssistantMessage, ResultMessage
+from claude_agent_sdk import query, ResultMessage
 
 from ..sdk_utils import (
     SDKUsageStats,

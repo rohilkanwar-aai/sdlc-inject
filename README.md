@@ -8,7 +8,7 @@ CLI tool for injecting realistic SDLC failure patterns into codebases for AI tra
 - **Claude Agent SDK** - Agentic codebase analysis with Read/Glob/Grep tools via the Claude Agent SDK
 - **Dynamic Tool Discovery** - Automatically discovers observability tools from real-world incidents and generates mock MCP servers for them
 - **Multi-Pattern Injection** - Combine patterns for complex cascading failure scenarios
-- **Mock MCP Servers** - Interactive Sentry, Slack, GitHub, PagerDuty, Prometheus APIs (plus dynamically discovered tools)
+- **Mock MCP Servers** - Interactive Sentry, Slack, GitHub, PagerDuty (plus dynamically discovered tools)
 - **Evaluation Harness** - Parallel agent testing with the Claude Agent SDK, in-process MCP servers, and cost tracking
 - **Realistic Artifacts** - Generate mock SDLC tool outputs for debugging exercises
 - **Progressive Incidents** - Simulate real-time incident evolution with rate limits and escalations

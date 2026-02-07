@@ -5,7 +5,7 @@ for rate limit violations.
 """
 
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 
@@ -68,7 +68,6 @@ class RateLimiter:
         self.request_times: deque[datetime] = deque()
         self.violations: int = 0
         self.stats = RateLimitStats()
-        self._last_cleanup: datetime = datetime.now()
 
     def _cleanup_old_requests(self, now: datetime) -> None:
         """Remove requests older than 1 minute from tracking."""

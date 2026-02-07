@@ -6,18 +6,11 @@ mock services (Sentry, Slack, GitHub, etc.) through a single entry point.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from ..models import Pattern
 from .base import BaseMCPServer, RequestLog, Response
 from .rate_limiter import RateLimitConfig
-
-if TYPE_CHECKING:
-    from .sentry import SentryMCPServer
-    from .slack import SlackMCPServer
-    from .github import GitHubMCPServer
-    from .pagerduty import PagerDutyMCPServer
-    from .prometheus import PrometheusMCPServer
 
 
 class MCPServerRegistry:
@@ -181,43 +174,3 @@ class MCPServerRegistry:
         for server in self.servers.values():
             server.reset()
 
-    def to_tool_description(self) -> str:
-        """Generate a tool description for agents.
-
-        Returns a string describing how to use the MCP registry
-        that can be included in agent prompts.
-        """
-        lines = [
-            "## Available MCP Services",
-            "",
-            "You can query the following services to gather information about the incident:",
-            "",
-        ]
-
-        for service, server in self.servers.items():
-            lines.append(f"### {service.title()}")
-            lines.append("")
-            for endpoint in server.get_endpoints():
-                lines.append(f"  - `{endpoint}`")
-            lines.append("")
-
-        lines.extend(
-            [
-                "### Usage",
-                "",
-                "To make a request, use the `mcp_request` tool with:",
-                "- `service`: The service name (sentry, slack, github, etc.)",
-                "- `method`: HTTP method (GET, POST)",
-                "- `endpoint`: The API endpoint",
-                "- `params`: Optional parameters as a dictionary",
-                "",
-                "Example:",
-                "```",
-                'mcp_request(service="sentry", method="GET", endpoint="/issues")',
-                "```",
-                "",
-                "Note: Rate limits apply. If you receive a 429 response, wait before retrying.",
-            ]
-        )
-
-        return "\n".join(lines)

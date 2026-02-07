@@ -26,7 +26,6 @@ from .mcp_integration import (
     MCPConfig,
     MCPStats,
     MCPToolProvider,
-    get_mcp_system_prompt_addition,
 )
 
 __all__ = [
@@ -53,5 +52,4 @@ __all__ = [
     "MCPConfig",
     "MCPStats",
     "MCPToolProvider",
-    "get_mcp_system_prompt_addition",
 ]

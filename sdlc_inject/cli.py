@@ -8,8 +8,24 @@ import yaml
 from rich.console import Console
 from rich.table import Table
 
+# Load environment variables from .env file if available
+try:
+    from dotenv import load_dotenv
+    import os
+    # Always try package directory first (most reliable location)
+    package_dir = Path(__file__).parent.parent
+    env_file = package_dir / ".env"
+    if env_file.exists():
+        load_dotenv(env_file, override=False)  # Don't override if already set
+    # Also try current directory (for user convenience)
+    load_dotenv(override=False)  # Don't override if already set from package dir
+except ImportError:
+    # python-dotenv not installed, skip loading .env
+    pass
+
 from .catalog import PatternCatalog, validate_catalog
 from .injection import inject_pattern
+from .multi_pattern import MultiPatternLoader, MultiPatternInjector
 from .grading import generate_grading_setup, evaluate_trajectory
 from .environment import generate_environment
 from .artifacts import generate_artifacts_for_pattern
@@ -183,6 +199,202 @@ def inject(ctx: click.Context, pattern_id: str, target: str, output: str, obfusc
         create_commits=commit,
         dry_run=dry_run,
     )
+
+
+# =============================================================================
+# Multi-Pattern Commands
+# =============================================================================
+
+
+@main.command("multi-list")
+@click.option("--configs-dir", default="./injection_configs", help="Multi-pattern configs directory")
+@click.option("-f", "--format", "fmt", default="table", help="Output format (table, json, yaml)")
+@click.pass_context
+def multi_list(ctx: click.Context, configs_dir: str, fmt: str) -> None:
+    """List available multi-pattern configurations."""
+    catalog: PatternCatalog = ctx.obj["catalog"]
+    loader = MultiPatternLoader(configs_dir, catalog)
+
+    configs = loader.list()
+
+    if not configs:
+        console.print("[yellow]No multi-pattern configurations found.[/yellow]")
+        console.print(f"[dim]Looked in: {configs_dir}[/dim]")
+        return
+
+    if fmt == "json":
+        data = [
+            {
+                "id": c.id,
+                "name": c.name,
+                "patterns": [p.pattern_id for p in c.patterns],
+                "root_cause": c.grading.root_cause_pattern if c.grading else None,
+                "difficulty_multiplier": c.total_difficulty_multiplier,
+                "estimated_hours": c.estimated_human_time_hours,
+            }
+            for c in configs
+        ]
+        console.print(json.dumps(data, indent=2))
+
+    elif fmt == "yaml":
+        data = [
+            {
+                "id": c.id,
+                "name": c.name,
+                "patterns": len(c.patterns),
+                "root_cause": c.grading.root_cause_pattern if c.grading else None,
+            }
+            for c in configs
+        ]
+        console.print(yaml.dump(data, default_flow_style=False))
+
+    else:  # table
+        table = Table(title=f"Multi-Pattern Configs ({len(configs)} total)")
+        table.add_column("ID", style="cyan")
+        table.add_column("Name", max_width=35)
+        table.add_column("Patterns", justify="right")
+        table.add_column("Root Cause", style="yellow")
+        table.add_column("Hours", justify="right")
+
+        for c in configs:
+            root_cause = c.grading.root_cause_pattern if c.grading else "-"
+            hours = f"{c.estimated_human_time_hours:.1f}" if c.estimated_human_time_hours else "-"
+
+            table.add_row(
+                c.id,
+                c.name[:33] + "..." if len(c.name) > 35 else c.name,
+                str(len(c.patterns)),
+                root_cause,
+                hours,
+            )
+
+        console.print(table)
+
+
+@main.command("multi-show")
+@click.argument("config_id")
+@click.option("--configs-dir", default="./injection_configs", help="Multi-pattern configs directory")
+@click.option("-f", "--format", "fmt", default="yaml", help="Output format (yaml, json, markdown)")
+@click.pass_context
+def multi_show(ctx: click.Context, config_id: str, configs_dir: str, fmt: str) -> None:
+    """Show details of a multi-pattern configuration."""
+    catalog: PatternCatalog = ctx.obj["catalog"]
+    loader = MultiPatternLoader(configs_dir, catalog)
+    config = loader.get(config_id)
+
+    if not config:
+        console.print(f"[red]Multi-pattern config not found: {config_id}[/red]")
+        raise SystemExit(1)
+
+    if fmt == "json":
+        console.print(json.dumps(config.model_dump(), indent=2))
+
+    elif fmt == "yaml":
+        console.print(yaml.dump(config.model_dump(), default_flow_style=False, sort_keys=False))
+
+    else:  # markdown
+        console.print(f"# {config.id} - {config.name}\n")
+        if config.description:
+            console.print(config.description)
+
+        console.print("\n## Patterns\n")
+        for entry in config.patterns:
+            pattern = catalog.get(entry.pattern_id)
+            root_cause = ""
+            if config.grading and entry.pattern_id == config.grading.root_cause_pattern:
+                root_cause = " [ROOT CAUSE]"
+
+            console.print(f"- **{entry.pattern_id}**{root_cause} (weight={entry.weight:.2f})")
+            if pattern:
+                console.print(f"  {pattern.name}")
+
+        if config.grading:
+            console.print("\n## Grading\n")
+            console.print(f"- **Root Cause:** {config.grading.root_cause_pattern}")
+            if config.grading.partial_credit:
+                console.print("- **Partial Credit:**")
+                for pid, credit in config.grading.partial_credit.items():
+                    console.print(f"  - {pid}: {credit*100:.0f}%")
+
+        console.print("\n## Difficulty\n")
+        console.print(f"- Multiplier: {config.total_difficulty_multiplier}x")
+        if config.estimated_human_time_hours:
+            console.print(f"- Estimated Time: {config.estimated_human_time_hours} hours")
+
+
+@main.command("multi-inject")
+@click.argument("config_id")
+@click.option("-t", "--target", required=True, help="Target codebase directory")
+@click.option("-o", "--output", required=True, help="Output directory")
+@click.option("--configs-dir", default="./injection_configs", help="Multi-pattern configs directory")
+@click.option("--seed", type=int, help="Random seed for reproducibility")
+@click.option("--dry-run", is_flag=True, help="Show what would be changed")
+@click.pass_context
+def multi_inject(
+    ctx: click.Context,
+    config_id: str,
+    target: str,
+    output: str,
+    configs_dir: str,
+    seed: int | None,
+    dry_run: bool,
+) -> None:
+    """Inject multiple patterns into a target codebase.
+
+    Injects multiple patterns according to a multi-pattern configuration,
+    creating complex debugging scenarios with root causes, contributing
+    factors, and optional red herrings.
+
+    Examples:
+        sdlc-inject multi-inject COMPLEX-001 --target ./zed --output ./injected-zed
+        sdlc-inject multi-inject COMPLEX-002 --target ./project --output ./out --seed 42
+    """
+    catalog: PatternCatalog = ctx.obj["catalog"]
+    loader = MultiPatternLoader(configs_dir, catalog)
+    config = loader.get(config_id)
+
+    if not config:
+        console.print(f"[red]Multi-pattern config not found: {config_id}[/red]")
+        console.print(f"[dim]Looked in: {configs_dir}[/dim]")
+        raise SystemExit(1)
+
+    # Validate configuration
+    is_valid, errors = loader.validate(config)
+    if not is_valid:
+        console.print(f"[red]Configuration validation failed:[/red]")
+        for err in errors:
+            console.print(f"  - {err}")
+        raise SystemExit(1)
+
+    target_path = Path(target)
+    if not target_path.exists():
+        console.print(f"[red]Target directory not found: {target}[/red]")
+        raise SystemExit(1)
+
+    # Create injector and run
+    injector = MultiPatternInjector(catalog, seed=seed)
+    result = injector.inject(
+        config=config,
+        target_dir=target_path,
+        output_dir=Path(output),
+        dry_run=dry_run,
+    )
+
+    # Save result metadata
+    if not dry_run:
+        metadata_path = Path(output) / ".multi-pattern-injection.json"
+        with open(metadata_path, "w") as f:
+            json.dump(result.to_dict(), f, indent=2)
+        console.print(f"\n[dim]Metadata saved to: {metadata_path}[/dim]")
+
+    if not result.success and not dry_run:
+        console.print(f"\n[yellow]Warning: Injection completed with errors[/yellow]")
+        raise SystemExit(1)
+
+
+# =============================================================================
+# Validation Commands
+# =============================================================================
 
 
 @main.command("validate")
@@ -695,6 +907,8 @@ def _clone_github_repo(url: str, ref: str | None = None, shallow: bool = True) -
 @click.option("--ref", help="Git branch, tag, or commit to checkout (for GitHub URLs)")
 @click.option("--shallow/--full", default=True, help="Shallow clone for faster downloads (for GitHub URLs)")
 @click.option("--keep-clone", is_flag=True, help="Keep cloned repo after analysis (for GitHub URLs)")
+@click.option("--max-budget", default=5.0, type=float, help="Maximum cost budget in USD for the analysis")
+@click.option("--discover-tools/--no-discover-tools", default=True, help="Discover external tools from incident data for dynamic MCP servers")
 @click.pass_context
 def neural_analyze(
     ctx: click.Context,
@@ -707,20 +921,23 @@ def neural_analyze(
     ref: str | None,
     shallow: bool,
     keep_clone: bool,
+    max_budget: float,
+    discover_tools: bool,
 ) -> None:
-    """Perform deep neural analysis of a codebase using Claude.
+    """Perform deep neural analysis of a codebase using Claude Agent SDK.
 
-    Unlike the basic 'analyze' command which uses regex patterns, neural-analyze
-    uses Claude to semantically understand code and identify vulnerability
-    injection points based on actual code logic.
+    Uses the Claude Agent SDK to give Claude direct access to codebase
+    exploration tools (Read, Glob, Grep). Claude can follow imports, trace
+    data flows, and identify cross-file vulnerabilities autonomously.
 
     Supports both local paths and GitHub URLs:
     - Local: ./my-project or /path/to/project
     - GitHub: https://github.com/owner/repo
 
     This provides:
+    - Agentic codebase exploration with Read/Glob/Grep tools
     - Semantic understanding of code flow and data dependencies
-    - Identification of race conditions, state corruption, resource leaks
+    - Cross-file vulnerability detection
     - Suggested injection points with explanations
     - Optional enrichment via Exa API for similar vulnerabilities
 
@@ -730,13 +947,27 @@ def neural_analyze(
         sdlc-inject neural-analyze https://github.com/owner/repo --ref v1.0.0
         sdlc-inject neural-analyze https://github.com/owner/repo --full --keep-clone
         sdlc-inject neural-analyze ./my-project --focus race --focus coordination
+        sdlc-inject neural-analyze ./my-project --max-budget 10.0
     """
     import os
     import shutil
 
+    # Ensure .env is loaded (in case it wasn't loaded at import time)
+    try:
+        from dotenv import load_dotenv
+        # Try package directory first (most reliable)
+        package_dir = Path(__file__).parent.parent
+        env_file = package_dir / ".env"
+        if env_file.exists():
+            load_dotenv(env_file, override=True)
+        load_dotenv(override=False)
+    except ImportError:
+        pass
+
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         console.print("[red]Error: ANTHROPIC_API_KEY environment variable required for neural analysis[/red]")
+        console.print("[yellow]Hint: Set ANTHROPIC_API_KEY env var or add it to .env file[/yellow]")
         raise SystemExit(1)
 
     exa_key = os.environ.get("EXA_API_KEY")
@@ -763,18 +994,20 @@ def neural_analyze(
     console.print(f"[bold]Neural Analysis of {codebase_path}[/bold]\n")
     console.print(f"Model: {model}")
     console.print(f"Max files: {max_files}")
+    console.print(f"Max budget: ${max_budget:.2f}")
     if focus:
         console.print(f"Focus patterns: {', '.join(focus)}")
-    console.print(f"Exa enrichment: {'enabled' if enrich else 'disabled'}\n")
+    console.print(f"Exa enrichment: {'enabled' if enrich else 'disabled'}")
+    console.print(f"Backend: Claude Agent SDK (agentic exploration)\n")
 
     analyzer = NeuralCodeAnalyzer(
-        api_key=api_key,
         model=model,
         exa_api_key=exa_key if enrich else None,
+        max_budget_usd=max_budget,
     )
 
     try:
-        with console.status("[bold green]Analyzing codebase with Claude...[/bold green]"):
+        with console.status("[bold green]Agent exploring codebase with Claude...[/bold green]"):
             result = analyzer.analyze_codebase(
                 codebase_path=analysis_path,
                 max_files=max_files,
@@ -782,19 +1015,45 @@ def neural_analyze(
                 output_file=output,
             )
 
-        # Optionally enrich with Exa
+        # Optionally enrich with Exa (and discover tools)
         if enrich and exa_key:
             with console.status("[bold blue]Enriching with similar vulnerabilities...[/bold blue]"):
                 result = analyzer.enrich_with_similar_code(
                     result,
                     search_similar=True,
                     search_incidents=True,
+                    discover_tools=discover_tools,
                 )
+
+            # Generate and save service configs for discovered tools
+            if discover_tools and result.discovered_tools and output:
+                try:
+                    from .discovery import SchemaGenerator, ToolProfile, save_service_configs
+
+                    output_dir = Path(output).parent / "service_configs"
+                    profiles = [ToolProfile.model_validate(t) for t in result.discovered_tools]
+                    if profiles:
+                        vuln_types = list(set(
+                            v.vulnerability_type for v in result.vulnerability_points[:5]
+                        ))
+                        vuln_context = ", ".join(vuln_types) if vuln_types else "production debugging"
+
+                        with console.status("[bold blue]Generating service configs for discovered tools...[/bold blue]"):
+                            generator = SchemaGenerator(model=model)
+                            configs = generator.generate_configs(profiles[:5], vuln_context)
+
+                        if configs:
+                            paths = save_service_configs(configs, output_dir)
+                            console.print(f"\n[green]Saved {len(paths)} service configs to {output_dir}[/green]")
+                except Exception as e:
+                    console.print(f"[yellow]Warning: Service config generation failed: {e}[/yellow]")
 
         # Display results
         console.print("\n[bold]Analysis Results[/bold]\n")
         console.print(f"Files analyzed: {result.files_analyzed}")
         console.print(f"Tokens used: {result.total_tokens_used:,}")
+        if result.total_cost_usd > 0:
+            console.print(f"Cost: ${result.total_cost_usd:.4f}")
         console.print(f"Vulnerabilities found: {len(result.vulnerability_points)}")
 
         console.print(f"\n[bold]Architecture Summary:[/bold]")
@@ -814,7 +1073,7 @@ def neural_analyze(
             table.add_column("Confidence", justify="right")
             table.add_column("Explanation", max_width=40)
 
-            for vuln in result.vulnerability_points[:15]:  # Show top 15
+            for vuln in result.vulnerability_points[:15]:
                 conf_color = "green" if vuln.confidence >= 0.7 else "yellow" if vuln.confidence >= 0.4 else "red"
                 table.add_row(
                     vuln.file_path[:28] + "..." if len(vuln.file_path) > 30 else vuln.file_path,
@@ -839,6 +1098,30 @@ def neural_analyze(
                 console.print(f"    Target: {', '.join(rec.get('target_files', []))[:50]}")
                 console.print(f"    Rationale: {rec.get('rationale', '')[:60]}")
                 console.print()
+
+        # Display discovered tools
+        if result.discovered_tools:
+            console.print(f"\n[bold]Discovered External Tools ({len(result.discovered_tools)}):[/bold]\n")
+
+            tools_table = Table()
+            tools_table.add_column("Tool", style="cyan")
+            tools_table.add_column("Category", style="yellow")
+            tools_table.add_column("Relevance", justify="right")
+            tools_table.add_column("Description", max_width=40)
+
+            for t in result.discovered_tools[:10]:
+                rel = t.get("relevance_score", 0)
+                rel_color = "green" if rel >= 0.6 else "yellow" if rel >= 0.3 else "dim"
+                tools_table.add_row(
+                    t.get("display_name", t.get("name", "?")),
+                    t.get("category", "other"),
+                    f"[{rel_color}]{rel:.2f}[/{rel_color}]",
+                    (t.get("description", "")[:38] + "...")
+                    if len(t.get("description", "")) > 40
+                    else t.get("description", ""),
+                )
+
+            console.print(tools_table)
 
         if output:
             console.print(f"\n[green]Full report written to {output}[/green]")
@@ -872,7 +1155,12 @@ def neural_analyze(
 @click.option("-m", "--model", default="claude-sonnet-4-20250514", help="Claude model to use")
 @click.option("--temperatures", default="0.0", help="Comma-separated temperature values")
 @click.option("--timeout", default=3600, help="Max time per agent in seconds")
+@click.option("--max-budget", default=2.0, type=float, help="Maximum cost budget per agent in USD")
 @click.option("--artifacts", help="Path to debugging artifacts")
+@click.option("--mcp-mode", is_flag=True, help="Enable MCP servers for observability tools")
+@click.option("--mcp-rate-limit", default=30, help="MCP API requests per minute limit")
+@click.option("--mcp-seed", type=int, help="Random seed for MCP server data")
+@click.option("--service-configs", help="Directory of ServiceConfig YAML files for dynamic MCP servers")
 @click.pass_context
 def evaluate(
     ctx: click.Context,
@@ -883,20 +1171,37 @@ def evaluate(
     model: str,
     temperatures: str,
     timeout: int,
+    max_budget: float,
     artifacts: str | None,
+    mcp_mode: bool,
+    mcp_rate_limit: int,
+    mcp_seed: int | None,
+    service_configs: str | None,
 ) -> None:
-    """Run parallel agent evaluation on an injected codebase.
+    """Run parallel agent evaluation on an injected codebase using Claude Agent SDK.
 
-    Spins up N agents to debug the same injected pattern, collects trajectories,
-    and analyzes success/failure patterns.
+    Spins up N agents (powered by the Claude Agent SDK) to debug the same
+    injected pattern, collects trajectories, and analyzes success/failure patterns.
+
+    Each agent has access to Read, Edit, Bash, Grep, and Glob tools via the SDK.
+    With --mcp-mode, agents also get mock Sentry, Slack, GitHub, PagerDuty,
+    and Prometheus tools via in-process SDK MCP servers.
 
     Examples:
         sdlc-inject evaluate RACE-001 --target ./injected-codebase --output ./results -n 10
-        sdlc-inject evaluate RACE-001 --target ./injected --output ./results --temperatures 0.0,0.3,0.7
+        sdlc-inject evaluate RACE-001 --target ./injected --output ./results --mcp-mode
+        sdlc-inject evaluate RACE-001 --target ./injected --output ./results --max-budget 5.0
     """
     import asyncio
 
-    from .harness import EvaluationConfig, Orchestrator
+    from .harness import EvaluationConfig, Orchestrator, MCPConfig
+
+    catalog: PatternCatalog = ctx.obj["catalog"]
+    pattern = catalog.get(pattern_id)
+
+    if not pattern:
+        console.print(f"[red]Pattern not found: {pattern_id}[/red]")
+        raise SystemExit(1)
 
     target_path = Path(target)
     if not target_path.exists():
@@ -906,14 +1211,40 @@ def evaluate(
     # Parse temperatures
     temp_list = [float(t.strip()) for t in temperatures.split(",")]
 
+    # Create MCP config if enabled
+    mcp_config = None
+    if mcp_mode:
+        # Load dynamic service configs if provided
+        dynamic_configs = []
+        if service_configs:
+            from .discovery import load_service_configs
+
+            configs_path = Path(service_configs)
+            if configs_path.exists():
+                dynamic_configs = load_service_configs(configs_path)
+                console.print(f"Loaded {len(dynamic_configs)} dynamic service configs from {configs_path}")
+            else:
+                console.print(f"[yellow]Warning: Service configs directory not found: {service_configs}[/yellow]")
+
+        mcp_config = MCPConfig(
+            enabled=True,
+            seed=mcp_seed,
+            rate_limit_enabled=True,
+            requests_per_minute=mcp_rate_limit,
+            dynamic_service_configs=dynamic_configs,
+        )
+
     config = EvaluationConfig(
         pattern_id=pattern_id,
         target_codebase=target_path,
         artifacts_dir=Path(artifacts) if artifacts else None,
         num_agents=num_agents,
         max_time_per_agent=timeout,
+        max_budget_per_agent=max_budget,
         model=model,
         temperatures=temp_list,
+        mcp_config=mcp_config,
+        pattern=pattern,
     )
 
     console.print(f"[bold]Running Evaluation: {pattern_id}[/bold]\n")
@@ -921,7 +1252,12 @@ def evaluate(
     console.print(f"Agents: {num_agents}")
     console.print(f"Model: {model}")
     console.print(f"Temperatures: {temp_list}")
-    console.print(f"Timeout: {timeout}s per agent\n")
+    console.print(f"Timeout: {timeout}s per agent")
+    console.print(f"Budget: ${max_budget:.2f} per agent")
+    console.print(f"Backend: Claude Agent SDK")
+    if mcp_mode:
+        console.print(f"MCP Mode: [green]Enabled[/green] (rate limit: {mcp_rate_limit}/min)")
+    console.print()
 
     try:
         orchestrator = Orchestrator()
@@ -959,11 +1295,228 @@ def evaluate(
                 for fm in run.analytics.failure_modes[:5]:
                     console.print(f"  • {fm.mode.value}: {fm.count} ({fm.frequency*100:.1f}%)")
 
+        # Display MCP stats if MCP mode was enabled
+        if run.mcp_stats:
+            console.print(f"\n[bold]MCP API Usage[/bold]\n")
+            mcp_table = Table()
+            mcp_table.add_column("Metric", style="cyan")
+            mcp_table.add_column("Value", justify="right")
+
+            mcp_table.add_row("Total Requests", str(run.mcp_stats.total_requests))
+            mcp_table.add_row("Successful", str(run.mcp_stats.successful_requests))
+            mcp_table.add_row("Rate Limited", f"[yellow]{run.mcp_stats.rate_limited_requests}[/yellow]")
+            mcp_table.add_row("Failed", f"[red]{run.mcp_stats.failed_requests}[/red]")
+            mcp_table.add_row("Rate Limit Violations", str(run.mcp_stats.rate_limit_violations))
+
+            console.print(mcp_table)
+
+            if run.mcp_stats.requests_by_service:
+                console.print("\n[bold]Requests by Service:[/bold]")
+                for service, count in sorted(run.mcp_stats.requests_by_service.items()):
+                    console.print(f"  • {service}: {count}")
+
         console.print(f"\n[green]Results saved to {output}[/green]")
 
     except Exception as e:
         console.print(f"[red]Error during evaluation: {e}[/red]")
         raise SystemExit(1)
+
+
+@main.command("generate-services")
+@click.argument("report_file")
+@click.option("-o", "--output", required=True, help="Output directory for ServiceConfig YAML files")
+@click.option("-m", "--model", default="claude-sonnet-4-20250514", help="Claude model for schema generation")
+@click.option("--max-tools", default=5, help="Maximum number of tools to generate configs for")
+@click.pass_context
+def generate_services(
+    ctx: click.Context,
+    report_file: str,
+    output: str,
+    model: str,
+    max_tools: int,
+) -> None:
+    """Generate ServiceConfig YAML files from a neural analysis report.
+
+    Takes the JSON report from neural-analyze (which includes discovered_tools)
+    and generates ServiceConfig YAML files that can be used with the evaluate
+    command's --service-configs option.
+
+    This is useful for:
+    - Manually reviewing/editing generated configs before evaluation
+    - Re-generating configs without re-running the full analysis
+    - Sharing service configs across team members
+
+    Examples:
+        sdlc-inject generate-services report.json -o ./service_configs/
+        sdlc-inject generate-services report.json -o ./configs/ --max-tools 3
+    """
+    import json as json_mod
+    from .discovery import ToolProfile, SchemaGenerator, save_service_configs
+
+    report_path = Path(report_file)
+    if not report_path.exists():
+        console.print(f"[red]Report file not found: {report_file}[/red]")
+        raise SystemExit(1)
+
+    # Load the report
+    with open(report_path) as f:
+        report_data = json_mod.load(f)
+
+    discovered_tools = report_data.get("discovered_tools", [])
+    if not discovered_tools:
+        console.print("[yellow]No discovered tools in this report. Run neural-analyze with --discover-tools first.[/yellow]")
+        return
+
+    # Parse ToolProfiles
+    profiles = []
+    for t in discovered_tools[:max_tools]:
+        try:
+            profiles.append(ToolProfile.model_validate(t))
+        except Exception as e:
+            console.print(f"[yellow]Warning: Skipping invalid tool profile: {e}[/yellow]")
+
+    if not profiles:
+        console.print("[yellow]No valid tool profiles found.[/yellow]")
+        return
+
+    console.print(f"[bold]Generating Service Configs[/bold]\n")
+    console.print(f"Tools to process: {len(profiles)}")
+    for p in profiles:
+        console.print(f"  - {p.display_name} ({p.category})")
+    console.print()
+
+    # Build vulnerability context from the report
+    vuln_types = list(set(
+        v.get("type", "") for v in report_data.get("vulnerability_points", [])[:10]
+    ))
+    vuln_context = ", ".join(vuln_types) if vuln_types else "production debugging"
+
+    # Generate configs
+    generator = SchemaGenerator(model=model)
+    try:
+        with console.status("[bold green]Generating service configs with Claude...[/bold green]"):
+            configs = generator.generate_configs(profiles, vuln_context)
+
+        if configs:
+            paths = save_service_configs(configs, Path(output))
+            console.print(f"\n[bold]Generated {len(configs)} service configs:[/bold]\n")
+            for path in paths:
+                console.print(f"  [green]{path}[/green]")
+            console.print(f"\nUse with: sdlc-inject evaluate --service-configs {output}")
+        else:
+            console.print("[yellow]No configs were generated.[/yellow]")
+
+    except Exception as e:
+        console.print(f"[red]Error generating configs: {e}[/red]")
+        raise SystemExit(1)
+
+
+@main.command("mcp-server")
+@click.argument("pattern_id")
+@click.option("--port", default=8080, help="Port to run server on")
+@click.option("--seed", type=int, help="Random seed for reproducibility")
+@click.option("--rate-limit", default=30, help="Requests per minute limit")
+@click.option("-f", "--format", "fmt", default="json", help="Response format (json, yaml)")
+@click.pass_context
+def mcp_server(
+    ctx: click.Context,
+    pattern_id: str,
+    port: int,
+    seed: int | None,
+    rate_limit: int,
+    fmt: str,
+) -> None:
+    """Start a standalone MCP server for testing.
+
+    Runs mock Sentry, Slack, GitHub, PagerDuty, and Prometheus servers
+    populated with realistic debugging data from the specified pattern.
+
+    Useful for:
+    - Testing MCP tool integrations
+    - Manual exploration of generated debugging data
+    - Developing and debugging agent behavior
+
+    Examples:
+        sdlc-inject mcp-server RACE-001
+        sdlc-inject mcp-server RACE-001 --port 8080 --seed 42
+        curl http://localhost:8080/sentry/issues
+        curl http://localhost:8080/slack/channels
+    """
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    import urllib.parse
+
+    from .mcp_servers import MCPServerRegistry
+    from .mcp_servers.rate_limiter import RateLimitConfig
+
+    catalog: PatternCatalog = ctx.obj["catalog"]
+    pattern = catalog.get(pattern_id)
+
+    if not pattern:
+        console.print(f"[red]Pattern not found: {pattern_id}[/red]")
+        raise SystemExit(1)
+
+    # Create registry
+    rate_config = RateLimitConfig(requests_per_minute=rate_limit)
+    registry = MCPServerRegistry(pattern, seed, rate_config)
+
+    class MCPHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            parsed = urllib.parse.urlparse(self.path)
+            path_parts = parsed.path.strip("/").split("/")
+
+            if len(path_parts) < 2:
+                self.send_error(400, "Invalid path. Use /{service}/{endpoint}")
+                return
+
+            service = path_parts[0]
+            endpoint = "/".join(path_parts[1:])
+
+            # Parse query parameters
+            params = dict(urllib.parse.parse_qsl(parsed.query))
+
+            # Make request through registry
+            response = registry.make_request(service, endpoint, params)
+
+            # Send response
+            self.send_response(response.status)
+            for key, value in response.headers.items():
+                self.send_header(key, value)
+            self.send_header("Content-Type", f"application/{fmt}")
+            self.end_headers()
+
+            if fmt == "yaml":
+                import yaml
+                body = yaml.dump(response.body, default_flow_style=False)
+            else:
+                body = json.dumps(response.body, indent=2)
+
+            self.wfile.write(body.encode())
+
+        def log_message(self, format, *args):
+            console.print(f"[dim]{self.address_string()} - {format % args}[/dim]")
+
+    console.print(f"[bold]Starting MCP Server for {pattern_id}[/bold]\n")
+    console.print(f"Port: {port}")
+    console.print(f"Seed: {seed or 'random'}")
+    console.print(f"Rate Limit: {rate_limit}/min")
+    console.print(f"Format: {fmt}\n")
+
+    console.print("[bold]Available endpoints:[/bold]")
+    console.print(f"  Sentry:    http://localhost:{port}/sentry/issues")
+    console.print(f"  Slack:     http://localhost:{port}/slack/channels")
+    console.print(f"  GitHub:    http://localhost:{port}/github/issues")
+    console.print(f"  PagerDuty: http://localhost:{port}/pagerduty/incidents")
+    console.print(f"  Prometheus: http://localhost:{port}/prometheus/alerts")
+    console.print()
+
+    server = HTTPServer(("localhost", port), MCPHandler)
+    console.print(f"[green]Server running at http://localhost:{port}[/green]")
+    console.print("[dim]Press Ctrl+C to stop[/dim]\n")
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Server stopped.[/yellow]")
 
 
 @main.command("analyze-trajectories")

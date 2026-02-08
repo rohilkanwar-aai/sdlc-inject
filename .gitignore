@@ -58,9 +58,5 @@ demo/artifacts-*/**/*.jsonl
 demo/artifacts-*/**/*.md
 !demo/artifacts-*/.gitkeep
 
-# Target codebases (cloned, not tracked -- too large)
-opentelemetry-demo/
-train-ticket/
-
 # WIP documents
 [WIP]*

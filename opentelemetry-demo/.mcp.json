@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "incident-tools": {
+      "command": "/Users/rohilkanwar/aai/sdlc_rfp/sdlc-inject/.venv/bin/python",
+      "args": ["/Users/rohilkanwar/aai/sdlc_rfp/sdlc-inject/evaluation/cascade-012/mcp_evidence_server.py"]
+    }
+  }
+}

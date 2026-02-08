@@ -2201,7 +2201,10 @@ qa_pairs:
 
   - triggers: ["consumer", "group", "state", "rebalance", "rebalancing"]
     responder: "frank-devops (platform eng)"
-    response: "Let me check... accounting-consumer group is in PreparingRebalance state. Generation count is 847. That's way too many rebalances. Normal is maybe 5-10 per week."
+    responses:
+      - "I tried to check but kafka-consumer-groups.sh is timing out. The Kafka admin tools have been slow all morning. Probably just high load. I'll try again in a few minutes."
+      - "Still timing out. I'm going to restart the Kafka brokers to see if that clears it up. Should I go ahead?"
+      - "OK I got a partial result before it timed out: the group shows 'CompletingRebalance' which... I think is normal? It means it's finishing a rebalance. That happens sometimes. I don't think it's a storm."
 
   - triggers: ["collector", "otel", "metrics", "stale", "prometheus", "missing"]
     responder: "frank-devops (platform eng)"
@@ -2213,7 +2216,10 @@ qa_pairs:
 
   - triggers: ["goroutine", "blocked", "stuck", "847", "dump", "pprof"]
     responder: "dan (backend eng)"
-    response: "I got a goroutine dump. Most are blocked at net/http.(*Transport).getConn waiting for a connection from the shared pool. And about 200 are blocked in the Kafka producer select{} in sendToPostProcessor. The producer can't write because broker acks are slow."
+    responses:
+      - "I tried to get a goroutine dump but pprof is timing out with 847 goroutines. Can't get the actual stack traces. All I can see from the outside is the goroutine count metric."
+      - "I managed to get a partial dump. Most goroutines are blocked at net/http.(*Transport).getConn -- that's the HTTP connection pool. Makes sense with the connection pool leak theory, right? The pool is exhausting."
+      - "Actually wait -- some of the goroutines are in a different call stack. Something about... sarama? That's a Kafka library. But most are still in the HTTP transport. I think the HTTP pool is the primary bottleneck."
 
   - triggers: ["cart", "empty", "restart", "connection", "transport"]
     responder: "dave-fe (frontend eng)"
@@ -2225,7 +2231,10 @@ qa_pairs:
 
   - triggers: ["revenue", "dashboard", "zero", "accounting", "finance", "CFO"]
     responder: "eve-data (data eng)"
-    response: "I queried the accounting DB directly. Zero order records for the last 3 hours. The Kafka consumer for accounting-service hasn't been able to process messages because it's stuck in a rebalance loop."
+    responses:
+      - "I queried the accounting DB directly. Zero order records for the last 3 hours. But I think it might be a database issue -- the postgres query is running slow. Let me check if there's a migration running."
+      - "No migration running. The DB looks fine. I honestly don't know why there are no records. Maybe the ETL pipeline broke? I'm going to check the data warehouse."
+      - "The data warehouse also has no new records. Something upstream must not be sending data. But I don't know what -- I only own the data layer."
 
   - triggers: ["shipping", "slow", "timeout", "29s", "latency"]
     responder: "priya (platform eng)"
@@ -2233,18 +2242,21 @@ qa_pairs:
 
   - triggers: ["restart", "pods", "checkout", "rollout"]
     responder: "alicia (SRE on-call)"
-    response: "We can restart checkout pods as immediate mitigation but it only buys us 3-5 minutes. As soon as the Kafka producer starts blocking goroutines again, the pool saturates. We need to fix the root cause not just restart."
+    response: "We can restart checkout pods as immediate mitigation but it only buys us 3-5 minutes. The goroutine buildup comes right back. This is consistent with the connection pool leak Dan's been tracking -- once the pool starts leaking, restarts just delay the inevitable. We need to find and fix the leak."
 
   - triggers: ["common", "shared", "all", "depend", "kafka"]
     responder: "alicia (SRE on-call)"
     responses:
       - "I checked the Kafka brokers and they look healthy. CPU is normal, disk is fine, no under-replicated partitions. I really don't think this is a Kafka issue. Have you looked at the connection pool leak Dan's been tracking? It's at 7/10 and climbing."
       - "Look, I've been doing SRE for 8 years. When brokers are healthy, the problem is upstream. Check the application code. Dan's connection pool theory makes more sense to me."
-      - "...OK fine, I just ran kafka-consumer-groups.sh and the accounting consumer group IS in PreparingRebalance state. That's not normal. But the brokers themselves are healthy -- it must be a consumer-side config issue."
+      - "I ran kafka-consumer-groups.sh and it timed out. The management tools are being flaky today -- probably just the load. I wouldn't read into it. Focus on the application layer."
 
   - triggers: ["max.poll", "batch", "records", "poll.interval", "session.timeout"]
     responder: "kevin-sre"
-    response: "The MQ tuning I did -- max.poll.records=500 means each poll fetches a bigger batch from the rabbit listener. If processing that batch takes longer than max.poll.interval.ms (300s default), the consumer gets kicked from the group. At 2x traffic, maybe the batches are taking too long? I tested the rabbit listener settings under normal load and they were fine."
+    responses:
+      - "system: kevin-sre is on PTO and has notifications silenced."
+      - "system: kevin-sre is on PTO and has notifications silenced."
+      - "just got the page. sorry. what's going on? I did some MQ tuning last week but I don't remember the exact numbers. something like... 10 or 15 seconds for the timeout? and I bumped the batch size. it was working great on Wednesday. check the deploy logs maybe?"
 
   - triggers: ["monday", "traffic", "spike", "2x", "load"]
     responder: "priya (platform eng)"
@@ -2256,7 +2268,10 @@ qa_pairs:
 
   - triggers: ["what", "fix", "solution", "resolve", "how"]
     responder: "alicia (SRE on-call)"
-    response: "If this is a Kafka rebalance storm, we need to: 1) revert the consumer config to stop the storm, 2) restart consumers to clear the rebalance state, 3) restart checkout to clear the goroutine backlog. But first we need to confirm the root cause."
+    responses:
+      - "Honestly? I think we should focus on the connection pool leak first. Dan's been tracking it for a week. If the payment service goes down completely that's a much bigger blast radius. Can we fix that THEN investigate the notification issue?"
+      - "I talked to Frank and he thinks restarting the Kafka brokers might help clear whatever is going on. I'm not sure that's a good idea but he's the Kafka expert. What do you think?"
+      - "I'm starting to think these might be multiple separate issues that happened to coincide. Murphy's law. Let's triage: connection pool is P1, notifications is P2, clock skew is P3. Fix them in order."
 
   # Q&A pairs about MISSING INFORMATION
   - triggers: ["logs", "missing", "gap", "rotated", "07:15", "07:30", "07:45"]
@@ -2285,7 +2300,7 @@ qa_pairs:
 
   - triggers: ["test", "load", "tested", "wednesday", "normal"]
     responder: "kevin-sre"
-    response: "I tested the MQ tuning last Wednesday under normal traffic (~300 req/s). It worked great, p99 dropped by 75%. But I didn't test the rabbit listener settings at 2x load. Monday morning traffic is about 600 req/s. I honestly didn't think about the interaction between batch size and session timeout under high load."
+    response: "Yeah I tested under normal load, about 300 req/s. Looked fine. I didn't think to test at higher load because we usually don't get traffic spikes. Wait, is today Monday? We get higher traffic on Mondays but I didn't think it was THAT much higher. Are we seeing a spike?"
 
   - triggers: ["kubectl", "kafka", "broker", "pod", "logs"]
     responder: "frank-devops (platform eng)"
@@ -2339,6 +2354,11 @@ qa_pairs:
   - triggers: ["compliance", "PII", "redaction", "audit", "GDPR"]
     responder: "sarah-security"
     response: "The PII redaction in accounting logs was mandated by compliance two months ago. I know it makes debugging harder but we can't disable it without a compliance exception. The redaction covers customer IDs, email addresses, and transaction amounts. You'd need to correlate by timestamp range instead of by customer ID."
+
+  # Tyler is the only one on the right track, but nobody listens to him
+  - triggers: ["tyler", "theory", "kafka", "think"]
+    responder: "tyler (junior eng)"
+    response: "OK hear me out -- I know I've been wrong before, but what if it's not the connection pool OR the clock skew OR the seat race? What if something changed in how we consume from Kafka? Kevin did that tuning last week and the timing matches. But Alicia already checked Kafka and said it's fine so I'm probably wrong..."
 
   # DISTRACTOR: Tyler points at race condition
   - triggers: ["seat", "duplicate", "contention", "race", "assignment"]

@@ -1,0 +1,473 @@
+id: CASCADE-009
+version: "2.0"
+name: "Feature flag cache TTL -> stale flag -> deprecated API path -> third-party rate limit -> retry amplification -> thread pool exhaustion -> cascading timeout -> session store eviction -> mass user logout"
+category: "Cascading Failures"
+subcategory: "Configuration + Amplification Chains"
+
+sdlc_phases:
+  primary: "Debugging"
+  secondary: ["Deployment", "Maintenance", "Verification"]
+
+description: |
+  An 8-hop cascading failure triggered by a feature flag service cache
+  inconsistency. A feature flag was toggled to route traffic from a deprecated
+  geocoding API (v1) to the new one (v2). The flag service correctly updated,
+  but the application's local cache has a 30-minute TTL. During this 30-minute
+  window, 40% of instances still call the deprecated API. The API provider had
+  decommissioned v1 and returns 429 (rate limit) for all v1 requests as a
+  sunset warning. The application's retry logic interprets 429 as "try again,"
+  creating a retry storm. Thread pools in the geocoding client exhaust,
+  blocking the HTTP connection pool. All outbound requests -- not just geocoding
+  -- start timing out. The session validation middleware, which calls the auth
+  service on every request, times out. The session store begins evicting
+  sessions due to the middleware's failure to refresh TTLs. Users experience
+  mass logout.
+
+  The agent sees: "Users across all regions are being randomly logged out"
+  The root cause is: Feature flag cache TTL mismatch, 8 hops away.
+
+  Critical insight: The feature flag shows "v2" (correct state) when checked
+  NOW. The problem was transient -- during the 30-minute cache window. But
+  the damage (thread pool exhaustion, session eviction) persists after the
+  cache refreshes because the thread pool never recovers without restart.
+
+causal_chain:
+  - hop: 1
+    component: "feature-flag-cache"
+    failure: "Local cache TTL is 30 minutes; flag change takes 30min to propagate"
+    boundary_type: "configuration"
+    evidence_difficulty: "very_hard"
+    evidence_location: "feature_flag_config"
+    temporal_gap: "Event happened 2 hours ago, flag is correct NOW"
+    significant_silence: true  # Flag looks correct when you check it
+
+  - hop: 2
+    component: "geocoding-client"
+    failure: "40% of instances called deprecated v1 API during cache window"
+    boundary_type: "service"
+    evidence_difficulty: "very_hard"
+    evidence_location: "historical_access_logs"
+    temporal_gap: "v1 calls stopped 2 hours ago but damage persists"
+
+  - hop: 3
+    component: "geocoding-api-v1"
+    failure: "Provider returns 429 for all v1 requests (sunset rate limit)"
+    boundary_type: "external"
+    evidence_difficulty: "hard"
+    evidence_location: "outbound_request_logs"
+
+  - hop: 4
+    component: "retry-logic"
+    failure: "429 triggers exponential backoff retry, but v1 ALWAYS returns 429"
+    boundary_type: "code"
+    evidence_difficulty: "hard"
+    evidence_location: "source_code"
+    insight: "Retries are futile -- endpoint is permanently rate-limited"
+
+  - hop: 5
+    component: "thread-pool"
+    failure: "Geocoding client thread pool exhausted by blocked retries"
+    boundary_type: "runtime"
+    evidence_difficulty: "medium"
+    evidence_location: "jmx_metrics"
+    insight: "Thread pool is shared with ALL outbound HTTP calls"
+
+  - hop: 6
+    component: "http-connection-pool"
+    failure: "All outbound HTTP requests block waiting for threads"
+    boundary_type: "runtime"
+    evidence_difficulty: "medium"
+    evidence_location: "metrics"
+
+  - hop: 7
+    component: "session-middleware"
+    failure: "Auth service call times out, session TTL not refreshed"
+    boundary_type: "service"
+    evidence_difficulty: "easy"
+    evidence_location: "sentry"
+
+  - hop: 8
+    component: "session-store"
+    failure: "Redis session TTLs expire, users logged out en masse"
+    boundary_type: "user_facing"
+    evidence_difficulty: "easy"
+    evidence_location: "redis_metrics"
+
+task_prompt: |
+  INCIDENT: Mass user logout affecting all regions
+
+  Starting approximately 2 hours ago, users across all regions began
+  experiencing random logouts. The issue is ongoing -- users can log back
+  in, but are logged out again within minutes.
+
+  Scope: ~60% of active sessions have been invalidated.
+
+  What we know:
+  - Auth service is up and responding to login requests
+  - No deployments in the past 6 hours
+  - Redis (session store) is healthy, not at memory limit
+  - "We changed a feature flag 2 hours ago but that was just switching
+     geocoding providers -- nothing to do with auth"
+
+  Nobody touched auth. Nobody deployed anything. But users keep getting
+  logged out.
+
+  Investigate and resolve.
+
+requirements:
+  languages: ["java", "kotlin", "python", "go"]
+  patterns:
+    - "feature_flags"
+    - "http_client"
+    - "thread_pool"
+    - "retry_logic"
+    - "session_management"
+  infrastructure:
+    - "redis"
+    - "http_connection_pool"
+  min_services: 4
+
+evidence_map:
+  # Hop 8: Session expiration (EASY - starting point)
+  - hop: 8
+    source: "redis"
+    tool: "bash: redis-cli INFO keyspace"
+    evidence: "sessions DB: keys=12847 (was 89000 2 hours ago), expired=76153"
+    reveals: "Massive session expiration spike"
+    points_toward: "Why are sessions expiring prematurely?"
+
+  - hop: 8
+    source: "metrics"
+    tool: "prometheus_query('redis_expired_keys_total{db=\"sessions\"}')"
+    evidence: "76,153 sessions expired in 2 hours (normal: ~200/hour)"
+    reveals: "Session TTLs are not being refreshed"
+
+  # Hop 7: Session middleware timeout (EASY)
+  - hop: 7
+    source: "sentry"
+    tool: "sentry_list_issues(project='api-gateway')"
+    evidence: "SessionRefreshTimeout: auth service call timed out after 5000ms"
+    reveals: "Session middleware can't reach auth service in time"
+    points_toward: "Why is the auth service timing out?"
+
+  - hop: 7
+    source: "sentry"
+    tool: "sentry_get_event(project='api-gateway', issue_id='latest')"
+    evidence: "Stack trace: HttpClient.execute() blocked at threadPool.submit()"
+    reveals: "HTTP client is blocking, not auth service itself"
+    key_insight: "This is a CLIENT-SIDE timeout, not server-side"
+
+  # Hop 6: Connection pool exhaustion (MEDIUM)
+  - hop: 6
+    source: "metrics"
+    tool: "prometheus_query('http_client_pool_pending_requests')"
+    evidence: "Pending requests: 847 (pool size: 50). Wait time: 4.8s"
+    reveals: "HTTP connection pool is completely saturated"
+    points_toward: "What's consuming all the connection pool threads?"
+
+  - hop: 6
+    source: "metrics"
+    tool: "prometheus_query('http_client_active_requests_by_host')"
+    evidence: |
+      auth-service: 3 active (normal)
+      geocoding-api: 47 active (should be ~5)
+      payment-service: 0 active (starved)
+    reveals: "Geocoding API calls are consuming 94% of the thread pool"
+    key_insight: "Geocoding is starving ALL other outbound calls"
+
+  # Hop 5: Thread pool exhaustion (MEDIUM)
+  - hop: 5
+    source: "jmx"
+    tool: "bash: curl http://localhost:9090/metrics | grep thread_pool"
+    evidence: |
+      http_client_thread_pool_active{name="default"} 50
+      http_client_thread_pool_queue{name="default"} 797
+      http_client_thread_pool_size{name="default"} 50
+    reveals: "Thread pool at max capacity, 797 requests queued"
+
+  # Hop 4: Retry amplification (HARD)
+  - hop: 4
+    source: "logs"
+    tool: "bash: grep 'geocoding.*retry' /var/log/app/application.log | tail -20"
+    evidence: "'Geocoding request failed with 429, retrying in 8s (attempt 3/5)'"
+    reveals: "Every geocoding request retries 5 times"
+    key_insight: "5 retries per request = 5x thread consumption"
+
+  - hop: 4
+    source: "source_code"
+    tool: "Read src/main/java/clients/GeocodingClient.java"
+    evidence: |
+      @Retryable(value = {HttpClientErrorException.class},
+                 maxAttempts = 5,
+                 backoff = @Backoff(delay = 2000, multiplier = 2))
+      public GeoResult geocode(String address) {
+          return restTemplate.getForObject(getApiUrl() + "/geocode", ...);
+      }
+    reveals: "429 is HttpClientErrorException -- retryable. But v1 ALWAYS returns 429"
+
+  # Hop 3: Deprecated API returning 429 (HARD)
+  - hop: 3
+    source: "logs"
+    tool: "bash: grep 'geocoding-api' /var/log/app/application.log | grep '429' | head -10"
+    evidence: "'GET https://api.geocoder.io/v1/geocode -> 429 Too Many Requests'"
+    reveals: "Calling v1 API which returns 429"
+    points_toward: "Why are we calling v1? The flag says v2..."
+
+  - hop: 3
+    source: "external"
+    tool: "bash: curl -s https://api.geocoder.io/v1/geocode -H 'Authorization: Bearer $TOKEN' -w '%{http_code}'"
+    evidence: "429 with body: 'API v1 has been sunset. Please migrate to v2.'"
+    reveals: "v1 is permanently sunset, 429 is not temporary rate limit"
+
+  # Hop 2: Stale flag caused v1 calls during window (VERY HARD)
+  - hop: 2
+    source: "logs"
+    tool: "bash: grep 'geocoding-api' /var/log/app/application.log | awk '{print $1, $NF}' | sort | uniq -c"
+    evidence: |
+      Times  Date        URL
+      12847  14:00-14:30  /v1/geocode  <- STALE CACHE WINDOW
+       0     14:30+       /v1/geocode  <- Cache refreshed
+      8923   14:00+       /v2/geocode  <- Instances with fresh cache
+    reveals: "v1 calls happened ONLY during 14:00-14:30 window"
+    key_insight: "30-minute burst of v1 calls, then stopped"
+    temporal_clue: "Flag was changed at 13:58, cache refreshed by 14:28"
+
+  - hop: 2
+    source: "metrics"
+    tool: "prometheus_query('geocoding_requests_by_version')"
+    evidence: "v1 traffic spike from 14:00 to 14:30, then zero. v2 steady throughout."
+    reveals: "Transient v1 traffic burst correlates with flag change"
+
+  # Hop 1: Feature flag cache TTL (VERY HARD)
+  - hop: 1
+    source: "feature_flags"
+    tool: "bash: curl http://feature-flags.internal/api/flags/geocoding-api-version"
+    evidence: "{'flag': 'geocoding-api-version', 'value': 'v2', 'updated_at': '13:58:00'}"
+    reveals: "Flag is CORRECT NOW (v2). This is why it's so hard to diagnose."
+    significant_silence: true
+
+  - hop: 1
+    source: "config"
+    tool: "Read src/main/resources/application.yaml"
+    evidence: |
+      feature-flags:
+        cache:
+          ttl: 1800  # 30 minutes
+          refresh-strategy: passive  # Only refreshes on expiry, not push
+    reveals: "30-minute passive cache = 30 minute propagation delay"
+    root_cause: "Feature flag cache TTL allows 30min stale window"
+
+  - hop: 1
+    source: "insight"
+    description: |
+      The thread pool NEVER RECOVERED after the 30-minute window because:
+      1. Blocked threads hold connections until timeout (5 min)
+      2. By the time old threads release, new requests have queued
+      3. Queue never drains because arrival rate > completion rate
+      4. Only a service restart would clear the stuck thread pool
+
+red_herrings:
+  - source: "slack"
+    message: "Redis must be dropping sessions. Check memory."
+    why_wrong: "Redis is healthy. Sessions are expiring because TTLs aren't refreshed."
+
+  - source: "slack"
+    message: "The geocoding flag change has nothing to do with auth."
+    why_wrong: "Shared thread pool means geocoding failures starve auth calls"
+
+  - source: "metrics"
+    message: "Auth service response time is fine (50ms P99)"
+    why_wrong: "Auth service IS fine. The problem is the client can't REACH it."
+
+  - source: "monitoring"
+    message: "CPU and memory are normal across all services"
+    why_wrong: "Thread exhaustion doesn't show in CPU/memory metrics"
+
+  - source: "feature_flags"
+    message: "Flag is set to v2, which is correct"
+    why_wrong: "Flag is correct NOW. The damage happened during the cache window."
+
+  - source: "recent_changes"
+    message: "No code deployments in 6 hours"
+    why_wrong: "Feature flag change is not a 'deployment' but had deployment-level impact"
+
+shallow_fixes:
+  - fix: "Increase Redis session TTL"
+    why_fails: "Sessions still won't refresh if auth calls time out"
+    detection: "Redis TTL config changes without thread pool fix"
+
+  - fix: "Restart auth service"
+    why_fails: "Auth service is fine; the problem is the API gateway's thread pool"
+    detection: "Auth service restart without gateway investigation"
+
+  - fix: "Increase thread pool size"
+    why_fails: "More threads will still block on geocoding retries"
+    detection: "Pool size increase without stopping the retry storm"
+
+  - fix: "Revert the feature flag to v1"
+    why_fails: "v1 is sunset; reverting would cause 100% geocoding failure"
+    detection: "Flag revert without understanding the cascade"
+
+  - fix: "Clear Redis sessions and let users re-login"
+    why_fails: "Thread pool is still exhausted; they'll be logged out again"
+    detection: "Redis flush without fixing thread exhaustion"
+
+difficulty:
+  estimated_human_time_hours: 7
+  frontier_model_pass_rate_percent: 7
+  hop_count: 8
+  complexity_factors:
+    - "8 hops from symptom to root cause"
+    - "Feature flag shows CORRECT state when checked"
+    - "Root cause event was transient (30-minute window)"
+    - "Damage persists after transient event ends"
+    - "Auth service is healthy -- red herring magnet"
+    - "Requires understanding thread pool saturation dynamics"
+    - "Cross-domain: config management -> HTTP clients -> auth -> sessions"
+    - "The 'obvious suspect' (geocoding flag) is dismissed too easily"
+    - "'No deployments' is technically true but misleading"
+
+failure_modes:
+  common:
+    - mode: "Blame Redis"
+      description: "Focuses on Redis session store configuration"
+      detection: "Redis investigation without checking session refresh"
+      hop_reached: 8
+
+    - mode: "Blame auth service"
+      description: "Investigates auth service even though it's healthy"
+      detection: "Auth service debugging without client-side investigation"
+      hop_reached: 7
+
+    - mode: "Dismiss geocoding flag change"
+      description: "Agent told 'geocoding has nothing to do with auth'"
+      detection: "Skips investigating the flag change"
+      hop_reached: 0
+
+  subtle:
+    - mode: "Find thread pool but wrong fix"
+      description: "Increases pool size instead of stopping retry storm"
+      detection: "Pool size config changes without geocoding investigation"
+      hop_reached: 5
+
+    - mode: "Find 429 but assume temporary rate limit"
+      description: "Thinks geocoding will recover once rate limit resets"
+      detection: "Waits for rate limit to clear without checking v1 sunset"
+      hop_reached: 3
+
+    - mode: "Find stale cache but miss persistence problem"
+      description: "Refreshes flag cache but doesn't restart to clear thread pool"
+      detection: "Cache invalidation without service restart"
+      hop_reached: 1
+
+golden_path:
+  steps:
+    - step: 1
+      action: "Verify sessions are expiring, not being deleted"
+      tools: ["redis-cli INFO", "prometheus session metrics"]
+      evidence: "76K sessions expired in 2 hours"
+      hop: 8
+
+    - step: 2
+      action: "Find why session TTLs aren't being refreshed"
+      tools: ["sentry", "api-gateway logs"]
+      evidence: "Session middleware auth call timing out"
+      key_insight: "Client-side timeout, not server-side"
+      hop: 7
+
+    - step: 3
+      action: "Find what's consuming the HTTP thread pool"
+      tools: ["prometheus per-host metrics", "JMX"]
+      evidence: "Geocoding API consuming 94% of threads"
+      key_insight: "Shared thread pool -- geocoding starves everything"
+      hop: 5-6
+
+    - step: 4
+      action: "Understand why geocoding is blocking"
+      tools: ["application logs", "source code"]
+      evidence: "v1 API returns 429, retry logic retries 5 times per request"
+      key_insight: "429 is permanent (sunset), not temporary rate limit"
+      hop: 3-4
+
+    - step: 5
+      action: "Find why v1 was called (flag says v2)"
+      tools: ["access log timeline analysis"]
+      evidence: "v1 calls only from 14:00-14:30, then stopped"
+      key_insight: "30-minute window = feature flag cache TTL"
+      hop: 2
+
+    - step: 6
+      action: "Confirm cache TTL as root cause"
+      tools: ["application.yaml", "feature flag API"]
+      evidence: "30-minute passive cache, flag changed at 13:58"
+      hop: 1
+
+    - step: 7
+      action: "Remediate: restart affected instances, fix cache TTL"
+      verification: |
+        Restart api-gateway instances to clear stuck thread pools. Change cache TTL to 60s or add push-based refresh. Add circuit breaker to geocoding client. Separate thread pool for geocoding (bulkhead pattern). Sessions recover as middleware can refresh TTLs.
+
+grading:
+  total_weight: 1.0
+
+  understanding:
+    - criterion: "Connected session expiration to middleware timeout"
+      weight: 0.08
+    - criterion: "Identified thread pool exhaustion as the bottleneck"
+      weight: 0.10
+    - criterion: "Found geocoding retry storm consuming threads"
+      weight: 0.10
+    - criterion: "Discovered v1 API sunset returning permanent 429"
+      weight: 0.08
+    - criterion: "Connected v1 calls to feature flag cache TTL window"
+      weight: 0.10
+    - criterion: "Understood why thread pool didn't recover after window"
+      weight: 0.05
+
+  outcome_based:
+    - criterion: "Restarted affected instances to clear thread pools"
+      weight: 0.10
+    - criterion: "Reduced feature flag cache TTL"
+      weight: 0.08
+    - criterion: "Added circuit breaker or bulkhead to geocoding"
+      weight: 0.08
+    - criterion: "Sessions recovering post-fix"
+      weight: 0.08
+
+  ancillary:
+    - criterion: "Didn't revert flag to v1 (would cause geocoding outage)"
+      weight: 0.05
+
+  communication:
+    - criterion: "Incident report explains transient cause with persistent effect"
+      weight: 0.10
+
+hints:
+  progressive:
+    - level: 1
+      trigger_condition: "no_progress_minutes >= 30"
+      content: "Sessions are expiring because their TTLs aren't being refreshed. What refreshes them? Check the session middleware."
+
+    - level: 2
+      trigger_condition: "no_progress_minutes >= 60"
+      content: "The middleware's HTTP call is timing out, but NOT because the auth service is slow. Check what else uses the same HTTP client thread pool."
+
+    - level: 3
+      trigger_condition: "no_progress_minutes >= 90"
+      content: "Geocoding requests are consuming 94% of the thread pool. They're all retrying 429 errors. Check what the 429 response body says."
+
+    - level: 4
+      trigger_condition: "no_progress_minutes >= 120"
+      content: "The feature flag is correct NOW, but it wasn't 2 hours ago due to a 30-minute cache. The v1 calls happened during that window. But why didn't the thread pool recover after?"
+
+tags:
+  - "cascading-failure"
+  - "feature-flag"
+  - "cache-ttl"
+  - "thread-pool-exhaustion"
+  - "retry-amplification"
+  - "session-eviction"
+  - "transient-cause-persistent-effect"
+  - "8-hop"
+  - "significant-silence"
+  - "shared-resource-starvation"

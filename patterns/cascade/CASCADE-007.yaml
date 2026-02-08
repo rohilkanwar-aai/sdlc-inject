@@ -1,0 +1,548 @@
+id: CASCADE-007
+version: "2.0"
+name: "DNS TTL cache -> stale service discovery -> split writes -> eventual consistency violation -> silent data divergence -> reconciliation failure -> customer billing dispute cascade"
+category: "Cascading Failures"
+subcategory: "Networking + Data Integrity Chains"
+
+sdlc_phases:
+  primary: "Debugging"
+  secondary: ["Maintenance", "Deployment", "Verification"]
+
+description: |
+  A 9-hop cascading failure where a DNS TTL misconfiguration during a routine
+  infrastructure migration causes two instances of the inventory service to
+  receive writes simultaneously. The old instance (running on the decommissioned
+  host) continues accepting writes for 4 hours because the local DNS resolver
+  cache hasn't expired. Both instances write to different database replicas,
+  creating a split-write scenario. The eventual consistency mechanism cannot
+  reconcile conflicting writes, causing silent data divergence. Inventory counts
+  become wrong, overselling occurs, orders fail at fulfillment, and customers
+  receive refund denials because the system thinks they were never charged.
+
+  The agent sees: "Customers say they were charged for items that were 'out of stock'"
+  The root cause is: A DNS TTL set to 14400s (4 hours) instead of 60s, 9 hops away.
+
+  Critical insight: Both inventory service instances show healthy metrics and
+  zero errors. The divergence is only visible by comparing the two database
+  replicas directly -- something no standard dashboard does. The decommissioned
+  host was "successfully migrated" 5 days ago.
+
+causal_chain:
+  - hop: 1
+    component: "dns-configuration"
+    failure: "inventory.internal A record TTL set to 14400s (4h) instead of 60s"
+    boundary_type: "infrastructure"
+    evidence_difficulty: "very_hard"
+    evidence_location: "dns_zone_file"
+    temporal_gap: "5 days ago during migration"
+    significant_silence: true  # DNS looks healthy
+
+  - hop: 2
+    component: "service-discovery"
+    failure: "API gateway caches old IP for 4 hours after migration cutover"
+    boundary_type: "infrastructure"
+    evidence_difficulty: "very_hard"
+    evidence_location: "resolver_cache"
+    significant_silence: true  # Gateway reports healthy
+
+  - hop: 3
+    component: "old-inventory-instance"
+    failure: "Decommissioned host still running, still receiving traffic via cached DNS"
+    boundary_type: "infrastructure"
+    evidence_difficulty: "hard"
+    evidence_location: "old_host_access_logs"
+    insight: "Host was 'decommissioned' but process still running"
+
+  - hop: 4
+    component: "database-replicas"
+    failure: "Old instance writes to replica-A, new instance writes to replica-B"
+    boundary_type: "data"
+    evidence_difficulty: "hard"
+    evidence_location: "replication_lag_metrics"
+    insight: "Both replicas accept writes; conflict resolution fails on concurrent updates"
+
+  - hop: 5
+    component: "inventory-counts"
+    failure: "Stock counts diverge: replica-A says 3 units, replica-B says 7 units"
+    boundary_type: "data"
+    evidence_difficulty: "medium"
+    evidence_location: "cross_replica_query"
+    significant_silence: true  # Each replica is internally consistent
+
+  - hop: 6
+    component: "order-service"
+    failure: "Orders accepted based on replica-B count (7), but fulfillment reads replica-A (3)"
+    boundary_type: "service"
+    evidence_difficulty: "medium"
+    evidence_location: "order_fulfillment_logs"
+
+  - hop: 7
+    component: "fulfillment"
+    failure: "Cannot fulfill 4 of 7 orders, marks them 'out of stock after purchase'"
+    boundary_type: "business_logic"
+    evidence_difficulty: "easy"
+    evidence_location: "fulfillment_dashboard"
+
+  - hop: 8
+    component: "refund-service"
+    failure: "Refund denied: system shows charge was voided (stale data from replica-A)"
+    boundary_type: "business_logic"
+    evidence_difficulty: "easy"
+    evidence_location: "customer_support_tickets"
+
+  - hop: 9
+    component: "customers"
+    failure: "Customers charged for items they can't receive AND denied refunds"
+    boundary_type: "user_facing"
+    evidence_difficulty: "easy"
+    evidence_location: "slack, sentry"
+
+task_prompt: |
+  ESCALATED: Multiple customers report being charged for items marked "out of stock."
+
+  The support team has received 34 complaints in 2 days. The pattern:
+  1. Customer places order, payment succeeds
+  2. Hours later, order status changes to "Cannot fulfill - out of stock"
+  3. Customer requests refund
+  4. Refund system says "No charge found for this order" or processes $0
+
+  The inventory team says stock levels are correct. The payments team says
+  charges are going through normally. The fulfillment team says "we're just
+  reporting what inventory tells us."
+
+  Everyone insists their system is working correctly.
+
+  Investigate why customers are being charged for unfulfillable orders and
+  why refunds are failing.
+
+requirements:
+  languages: ["python", "go", "typescript", "java"]
+  patterns:
+    - "service_discovery"
+    - "dns_resolution"
+    - "database_replication"
+    - "eventual_consistency"
+    - "inventory_management"
+  infrastructure:
+    - "dns"
+    - "postgres_replication"
+    - "api_gateway"
+    - "kubernetes"
+  min_services: 5
+
+evidence_map:
+  # Hop 9: Customer complaints (EASY - starting point)
+  - hop: 9
+    source: "slack"
+    tool: "slack_get_messages('#support')"
+    evidence: "34 customers: 'charged for out-of-stock item, refund says $0'"
+    reveals: "Pattern: charge succeeds, fulfillment fails, refund fails"
+    points_toward: "Why would all three of these fail in sequence?"
+
+  - hop: 9
+    source: "pagerduty"
+    tool: "pagerduty_list_incidents()"
+    evidence: "P2: Fulfillment failure rate spiked from 0.1% to 12%"
+    reveals: "Fulfillment failures correlate with customer complaints"
+
+  # Hop 8: Refund failures (EASY)
+  - hop: 8
+    source: "sentry"
+    tool: "sentry_list_issues(project='refund-service')"
+    evidence: "RefundError: Original charge amount is $0.00 for order_id=*"
+    reveals: "Refund service reads $0 charge for orders that were actually charged"
+    points_toward: "Where is refund-service reading charge data from?"
+
+  - hop: 8
+    source: "database"
+    tool: "bash: psql -c \"SELECT order_id, amount FROM charges WHERE order_id IN (SELECT order_id FROM refund_requests WHERE status='denied') LIMIT 10\""
+    evidence: "Some charge records show amount=0, but Stripe shows actual charge"
+    reveals: "Database has different data than payment processor"
+    key_insight: "Data divergence between our DB and Stripe"
+
+  # Hop 7: Fulfillment failures (EASY)
+  - hop: 7
+    source: "logs"
+    tool: "bash: grep 'out_of_stock' /var/log/fulfillment/app.log | tail -20"
+    evidence: "'SKU-4827: stock_count=3, orders_pending=7, cannot_fulfill=4'"
+    reveals: "More orders were accepted than stock available"
+    points_toward: "How did 7 orders get accepted with only 3 items?"
+
+  # Hop 6: Order acceptance vs fulfillment read (MEDIUM)
+  - hop: 6
+    source: "logs"
+    tool: "bash: grep 'inventory_check' /var/log/order-service/app.log | grep SKU-4827"
+    evidence: "'SKU-4827: available=7, reserving 1' (at order time)"
+    reveals: "Order service saw 7 available at time of order"
+    key_insight: "Order service and fulfillment see DIFFERENT stock counts"
+
+  - hop: 6
+    source: "database"
+    tool: "bash: psql replica-b -c \"SELECT stock_count FROM inventory WHERE sku='SKU-4827'\""
+    evidence: "stock_count=7 on replica-B"
+    reveals: "One replica says 7"
+
+  # Hop 5: Data divergence (MEDIUM)
+  - hop: 5
+    source: "database"
+    tool: "bash: psql replica-a -c \"SELECT stock_count FROM inventory WHERE sku='SKU-4827'\""
+    evidence: "stock_count=3 on replica-A"
+    reveals: "DIFFERENT stock counts on different replicas"
+    key_insight: "Replicas have diverged -- this should not happen"
+
+  - hop: 5
+    source: "metrics"
+    tool: "prometheus_query('pg_replication_lag_seconds')"
+    evidence: "Replication lag shows 0ms -- replicas appear in sync"
+    red_herring: "Lag metrics look healthy because both replicas are masters"
+
+  # Hop 4: Split writes (HARD)
+  - hop: 4
+    source: "database"
+    tool: "bash: psql replica-a -c \"SELECT source_host, COUNT(*) FROM inventory_audit_log WHERE updated_at > now() - interval '5 days' GROUP BY source_host\""
+    evidence: "Two different source hosts writing to inventory: 10.0.1.47 AND 10.0.2.12"
+    reveals: "TWO inventory service instances are writing concurrently"
+    key_insight: "The old host is still writing to replica-A"
+
+  # Hop 3: Old instance still running (HARD)
+  - hop: 3
+    source: "infrastructure"
+    tool: "bash: curl -s http://10.0.1.47:8080/health"
+    evidence: "{'status': 'healthy', 'version': 'v2.3.1', 'uptime': '12d'}"
+    reveals: "Old instance has been running for 12 days, through the migration"
+    key_insight: "Decommissioned host was never actually stopped"
+
+  - hop: 3
+    source: "logs"
+    tool: "bash: ssh 10.0.1.47 'cat /var/log/inventory/access.log | wc -l'"
+    evidence: "847,293 requests in the last 5 days"
+    reveals: "Old instance is still receiving significant traffic"
+
+  # Hop 2: DNS still pointing to old host (VERY HARD)
+  - hop: 2
+    source: "dns"
+    tool: "bash: dig inventory.internal @10.0.0.2"
+    evidence: "inventory.internal. 14400 IN A 10.0.2.12 (new host)"
+    reveals: "Authoritative DNS is correct (points to new host)"
+    red_herring: "DNS looks correct when queried fresh"
+
+  - hop: 2
+    source: "dns_cache"
+    tool: "bash: dig inventory.internal @127.0.0.1"
+    evidence: "inventory.internal. 8247 IN A 10.0.1.47 (OLD host, cached)"
+    reveals: "Local resolver still has OLD IP cached from before migration"
+    key_insight: "Gateway's local DNS cache still resolves to old host"
+
+  # Hop 1: DNS TTL misconfiguration (VERY HARD)
+  - hop: 1
+    source: "dns_zone"
+    tool: "bash: cat /etc/bind/zones/internal.zone | grep inventory"
+    evidence: "inventory  14400  IN  A  10.0.2.12  ; migrated 2024-11-23"
+    reveals: "TTL is 14400 seconds (4 hours) -- should be 60s for service records"
+    root_cause: "TTL was not lowered before migration, causing prolonged cache"
+
+  - hop: 1
+    source: "migration_runbook"
+    tool: "Read docs/migrations/inventory-migration-2024-11-23.md"
+    evidence: "Step 3: Lower TTL to 60s [SKIPPED - 'already low enough']"
+    reveals: "Migration step was skipped because operator assumed TTL was low"
+
+red_herrings:
+  - source: "slack"
+    message: "Did we recently change the fulfillment logic? Maybe the stock check is wrong."
+    why_wrong: "Fulfillment is reading correctly from its replica; the data is wrong"
+
+  - source: "metrics"
+    message: "Replication lag is 0ms -- replicas are in sync"
+    why_wrong: "Both replicas are accepting writes independently; lag metric is meaningless"
+
+  - source: "recent_deploy"
+    message: "We deployed inventory v2.4.0 three days ago"
+    why_wrong: "New version is working correctly; old version is the ghost writer"
+
+  - source: "database"
+    message: "Maybe the inventory counts are just wrong in the source data?"
+    why_wrong: "Counts are correct on each replica individually; the problem is divergence"
+
+  - source: "slack"
+    message: "The refund service has a known bug with zero-amount charges"
+    why_wrong: "Refund service is working correctly; it's reading stale/wrong data"
+
+  - source: "monitoring"
+    message: "All services show green on the dashboard"
+    why_wrong: "Both old and new instances are independently healthy -- that's the problem"
+
+shallow_fixes:
+  - fix: "Manually correct inventory counts"
+    why_fails: "Old instance will keep writing divergent data"
+    detection: "Direct DB updates without finding ghost instance"
+
+  - fix: "Force replication sync"
+    why_fails: "Without stopping dual writes, sync will be overwritten immediately"
+    detection: "pg_replication commands without stopping old instance"
+
+  - fix: "Fix the refund service to read from Stripe directly"
+    why_fails: "Addresses symptom, not the data divergence root cause"
+    detection: "Refund code changes without inventory investigation"
+
+  - fix: "Restart the new inventory instance"
+    why_fails: "New instance is fine; old ghost instance is the problem"
+    detection: "Restart commands for new host only"
+
+  - fix: "Add inventory count validation before order acceptance"
+    why_fails: "Validation would read divergent data too"
+    detection: "Order service code changes without fixing split writes"
+
+difficulty:
+  estimated_human_time_hours: 8
+  frontier_model_pass_rate_percent: 6
+  hop_count: 9
+  complexity_factors:
+    - "9 hops from symptom to root cause"
+    - "BOTH instances report healthy (dual significant silence)"
+    - "DNS looks correct when queried from authoritative server"
+    - "Replication lag metrics are misleading (0ms)"
+    - "Requires comparing data across replicas manually"
+    - "Old host 'decommissioned' 5 days ago but still running"
+    - "Migration was marked 'complete' successfully"
+    - "Every individual system is working correctly"
+    - "Evidence requires querying the same data from two sources and comparing"
+
+failure_modes:
+  common:
+    - mode: "Blame fulfillment logic"
+      description: "Assumes fulfillment stock check is wrong"
+      detection: "Fulfillment code review without data comparison"
+      hop_reached: 7
+
+    - mode: "Fix refund service"
+      description: "Patches refund to read from Stripe instead of DB"
+      detection: "Refund code changes without finding divergence"
+      hop_reached: 8
+
+    - mode: "Correct inventory counts manually"
+      description: "Updates stock counts without finding why they diverged"
+      detection: "SQL UPDATE without stopping ghost instance"
+      hop_reached: 5
+
+  subtle:
+    - mode: "Find divergence but blame replication bug"
+      description: "Discovers replicas have different data but assumes DB bug"
+      detection: "Opens ticket with database vendor"
+      hop_reached: 5
+
+    - mode: "Find old instance but not DNS cause"
+      description: "Discovers old host still running but just kills it"
+      detection: "Process kill without DNS TTL fix"
+      hop_reached: 3
+
+    - mode: "Find DNS cache but not migration runbook gap"
+      description: "Clears DNS cache but doesn't prevent recurrence"
+      detection: "Cache flush without TTL policy fix"
+      hop_reached: 2
+
+golden_path:
+  overview: |
+    A senior engineer traces from customer billing complaints through inventory
+    divergence across replicas to discover a ghost instance writing to one
+    replica while the new instance writes to another. The root cause is a DNS
+    TTL that was too high during migration, causing cached resolution to the
+    old host for 4 hours -- enough for thousands of divergent writes.
+
+  steps:
+    - step: 1
+      action: "Understand the complaint pattern"
+      tools: ["slack_get_messages('#support')", "pagerduty_list_incidents()"]
+      evidence: "Charged + unfulfilled + refund denied = three failures in sequence"
+      time_estimate_minutes: 15
+      hop: 8-9
+
+    - step: 2
+      action: "Verify refund failure cause"
+      tools: ["sentry", "psql charges table"]
+      evidence: "DB shows $0 charge for orders that Stripe shows were charged"
+      key_insight: "Our data disagrees with Stripe -- data integrity issue"
+      time_estimate_minutes: 15
+      hop: 8
+
+    - step: 3
+      action: "Check fulfillment failure cause"
+      tools: ["fulfillment logs", "inventory queries"]
+      evidence: "Order service saw 7 available, fulfillment sees 3"
+      key_insight: "Different services see different inventory counts"
+      time_estimate_minutes: 15
+      hop: 6-7
+
+    - step: 4
+      action: "Compare inventory across replicas"
+      tools: ["psql replica-a", "psql replica-b"]
+      evidence: "replica-A: 3, replica-B: 7 for same SKU"
+      key_insight: "REPLICAS HAVE DIVERGED"
+      time_estimate_minutes: 20
+      hop: 5
+
+    - step: 5
+      action: "Find who is writing to each replica"
+      tools: ["inventory_audit_log query"]
+      evidence: "Two different source_host IPs writing: old and new"
+      key_insight: "Two inventory instances are writing simultaneously"
+      time_estimate_minutes: 15
+      hop: 4
+
+    - step: 6
+      action: "Investigate the old host"
+      tools: ["curl health check", "access log analysis"]
+      evidence: "Old host is alive, healthy, serving traffic for 12 days"
+      key_insight: "Decommissioned host was never stopped"
+      time_estimate_minutes: 15
+      hop: 3
+
+    - step: 7
+      action: "Find why traffic still goes to old host"
+      tools: ["dig @authoritative", "dig @local-resolver"]
+      evidence: "Authoritative DNS is correct, but local cache has OLD IP"
+      key_insight: "DNS cache still resolving to old host"
+      time_estimate_minutes: 15
+      hop: 2
+
+    - step: 8
+      action: "Find why DNS cache is stale"
+      tools: ["zone file inspection", "migration runbook"]
+      evidence: "TTL=14400s, migration step to lower TTL was skipped"
+      time_estimate_minutes: 10
+      hop: 1
+
+    - step: 9
+      action: "Remediate: stop old instance, reconcile data, fix TTL, update runbook"
+      tools: ["stop old process", "data reconciliation", "DNS TTL update"]
+      verification: |
+        Old instance stopped. Replicas reconciled. TTL lowered to 60s. Affected customers refunded correctly. Migration runbook updated with mandatory TTL step.
+      time_estimate_minutes: 45
+
+grading:
+  total_weight: 1.0
+
+  understanding:
+    - criterion: "Discovered replica data divergence"
+      weight: 0.10
+      verification: "LLM judge on transcript"
+    - criterion: "Identified dual-write from two instances"
+      weight: 0.10
+      verification: "LLM judge on transcript"
+    - criterion: "Found ghost instance on old host"
+      weight: 0.10
+      verification: "LLM judge on transcript"
+    - criterion: "Traced traffic routing to DNS cache"
+      weight: 0.10
+      verification: "LLM judge on transcript"
+    - criterion: "Identified DNS TTL as root cause"
+      weight: 0.10
+      verification: "LLM judge on transcript"
+
+  outcome_based:
+    - criterion: "Stopped old inventory instance"
+      weight: 0.10
+      verification:
+        type: "process_check"
+        command: "curl -sf http://10.0.1.47:8080/health; echo $?"
+        expected: "non-zero exit"
+    - criterion: "Reconciled inventory data across replicas"
+      weight: 0.10
+      verification:
+        type: "db_check"
+        query: "SELECT COUNT(*) FROM inventory WHERE stock_count_a != stock_count_b"
+        expected: 0
+    - criterion: "Fixed DNS TTL"
+      weight: 0.05
+      verification:
+        type: "command_check"
+        command: "dig inventory.internal | grep -oP '\\d+(?=\\s+IN\\s+A)'"
+        expected: "60"
+
+  ancillary:
+    - criterion: "Refunded affected customers correctly"
+      weight: 0.05
+      verification:
+        type: "db_check"
+        query: "SELECT COUNT(*) FROM refund_requests WHERE status='denied' AND created_at > now() - interval '5 days'"
+        expected: 0
+    - criterion: "Didn't break healthy inventory instance"
+      weight: 0.05
+      verification: "New instance health check passes"
+
+  communication:
+    - criterion: "Incident report explains full chain and prevention"
+      weight: 0.10
+      verification: "LLM judge on incident report file"
+      criteria:
+        - "Explains DNS TTL role in migration failures"
+        - "Recommends mandatory TTL lowering in migration runbooks"
+        - "Documents data reconciliation steps"
+
+  collateral:
+    - criterion: "Didn't drop or corrupt either replica"
+      weight: 0.05
+      verification: "Database integrity check"
+
+hints:
+  progressive:
+    - level: 1
+      trigger_condition: "no_progress_minutes >= 30"
+      content: "The fulfillment failures and refund failures share a root cause. Check whether different services are reading the same data."
+
+    - level: 2
+      trigger_condition: "no_progress_minutes >= 60"
+      content: "Compare the inventory count for the same SKU across different database replicas. Are they the same?"
+
+    - level: 3
+      trigger_condition: "no_progress_minutes >= 90"
+      content: "Two different hosts are writing inventory updates. Check the inventory audit log for source_host values. Where is the second writer coming from?"
+
+    - level: 4
+      trigger_condition: "no_progress_minutes >= 120"
+      content: "The old inventory host was 'decommissioned' 5 days ago but is still running. Why is it still receiving traffic? Check DNS resolution from the API gateway's perspective vs. authoritative DNS."
+
+environment:
+  services:
+    - name: "inventory-service-new"
+      language: "python"
+      host: "10.0.2.12"
+    - name: "inventory-service-old"
+      language: "python"
+      host: "10.0.1.47"
+      note: "Should be decommissioned but still running"
+    - name: "order-service"
+      language: "python"
+    - name: "fulfillment-service"
+      language: "python"
+    - name: "refund-service"
+      language: "python"
+
+    - name: "postgres-replica-a"
+      role: "primary for old instance"
+    - name: "postgres-replica-b"
+      role: "primary for new instance"
+
+    - name: "dns-server"
+      config:
+        zone_file: "/etc/bind/zones/internal.zone"
+        ttl: 14400
+
+related_incidents:
+  - url: "https://github.blog/2018-10-30-oct21-post-incident-analysis/"
+    title: "GitHub October 21 incident - database split"
+    relevance: "Split-write scenario from network partition"
+  - url: "https://aws.amazon.com/message/41926/"
+    title: "AWS S3 outage 2017"
+    relevance: "Cascading failure from infrastructure change"
+
+tags:
+  - "cascading-failure"
+  - "dns-ttl"
+  - "split-writes"
+  - "data-divergence"
+  - "ghost-instance"
+  - "migration-failure"
+  - "9-hop"
+  - "dual-significant-silence"
+  - "service-discovery"

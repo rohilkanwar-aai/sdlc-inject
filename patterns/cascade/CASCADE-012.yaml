@@ -1,0 +1,635 @@
+id: CASCADE-012
+version: "2.0"
+name: "Kafka consumer tuning -> rebalance storm -> 5-branch cascade (checkout failures + accounting data loss + observability blindness + cart emptying + stale recommendations)"
+category: "Cascading Failures"
+subcategory: "Infrastructure + Distributed Systems"
+
+sdlc_phases:
+  primary: "Debugging"
+  secondary: ["Maintenance", "Verification", "Deployment"]
+
+description: |
+  A 30-hop branching cascading failure originating from a routine Kafka consumer
+  configuration change. An SRE reduced session.timeout.ms from 30s to 6s and
+  increased max.poll.records from 100 to 500 as a "latency optimization." Under
+  the weekly Monday morning 2x traffic spike, the larger batch causes
+  max.poll.interval.ms to be exceeded, triggering a consumer group rebalance
+  storm -- a well-documented Kafka pathology where each rebalance causes more
+  poll timeouts, causing more rebalances.
+
+  The rebalance storm destabilizes Kafka brokers, which impacts:
+  1. The checkout service's async Kafka producer (blocks goroutines)
+  2. The accounting service's consumers (messages fall off retention)
+  3. The OTel Collector's Kafka exporter (drops spans/metrics)
+  4. The cart service (via checkout GC pressure cascading to gRPC)
+  5. The recommendation service (via collector backpressure on traces)
+
+  Five teams see five different symptoms simultaneously. None can see the full
+  picture because the observability pipeline (Branch C) is itself degraded.
+
+  The agent sees: "Multiple teams reporting simultaneous issues across checkout,
+  finance, monitoring, cart, and recommendations."
+  The root cause is: A Kafka consumer config commit from 5 days ago, triggered
+  by Monday traffic patterns.
+
+  Critical insight: The observability tools (Prometheus, Jaeger, logs) are
+  themselves broken because the OTel Collector backs up and drops data. The
+  agent must first realize its investigation tools are degraded before it
+  can effectively debug the underlying services.
+
+causal_chain:
+  # =========================================================================
+  # ROOT CAUSE + SHARED INFRASTRUCTURE (Hops 1-4)
+  # =========================================================================
+  - hop: 1
+    component: "kafka-consumer-config"
+    failure: "session.timeout.ms reduced 30s->6s, max.poll.records increased 100->500"
+    boundary_type: "configuration"
+    evidence_difficulty: "very_hard"
+    evidence_location: "git_history"
+    temporal_gap: "5 days ago"
+    significant_silence: true
+
+  - hop: 2
+    component: "kafka-consumer-group"
+    failure: "Monday 2x traffic spike causes batch processing to exceed max.poll.interval.ms, triggering rebalance"
+    boundary_type: "infrastructure"
+    evidence_difficulty: "very_hard"
+    evidence_location: "kafka_metrics"
+
+  - hop: 3
+    component: "kafka-brokers"
+    failure: "Rebalance storm: each rebalance causes more timeouts, causing more rebalances (doom loop)"
+    boundary_type: "infrastructure"
+    evidence_difficulty: "hard"
+    evidence_location: "kafka_logs"
+
+  - hop: 4
+    component: "otel-collector"
+    failure: "Collector's Kafka exporter backs up, memory_limiter drops incoming spans/metrics"
+    boundary_type: "infrastructure"
+    evidence_difficulty: "hard"
+    evidence_location: "collector_logs"
+    significant_silence: true
+
+  # =========================================================================
+  # BRANCH A: Checkout Revenue (Hops 5-10)
+  # =========================================================================
+  - hop: 5
+    component: "checkout-kafka-producer"
+    failure: "sendToPostProcessor blocks on Kafka Input() channel due to broker instability"
+    boundary_type: "service"
+    evidence_difficulty: "hard"
+    evidence_location: "checkout_logs"
+    branch: "A"
+
+  - hop: 6
+    component: "checkout-goroutines"
+    failure: "Each blocked PlaceOrder request holds a goroutine waiting on Kafka select; count climbs to 847+"
+    boundary_type: "runtime"
+    evidence_difficulty: "medium"
+    evidence_location: "go_goroutines_metric"
+    branch: "A"
+
+  - hop: 7
+    component: "checkout-http-pool"
+    failure: "Goroutine accumulation exhausts shared HTTP transport MaxConnsPerHost=20"
+    boundary_type: "runtime"
+    evidence_difficulty: "medium"
+    evidence_location: "http_transport_metrics"
+    branch: "A"
+
+  - hop: 8
+    component: "checkout-outbound"
+    failure: "All outbound HTTP calls (shipping, email) queue behind exhausted pool, timeout at 30s"
+    boundary_type: "service"
+    evidence_difficulty: "easy"
+    evidence_location: "sentry"
+    branch: "A"
+
+  - hop: 9
+    component: "checkout-orders"
+    failure: "Payment succeeds (gRPC, different transport) but shipping fails -- charged-but-not-shipped orders"
+    boundary_type: "business_logic"
+    evidence_difficulty: "easy"
+    evidence_location: "support_tickets"
+    branch: "A"
+
+  - hop: 10
+    component: "fraud-detection"
+    failure: "Customers retry checkout, duplicate charges trigger fraud auto-suspension"
+    boundary_type: "business_logic"
+    evidence_difficulty: "easy"
+    evidence_location: "sentry"
+    branch: "A"
+
+  # =========================================================================
+  # BRANCH B: Accounting Data Loss (Hops 11-15)
+  # =========================================================================
+  - hop: 11
+    component: "accounting-consumer"
+    failure: "Consumer perpetually rebalancing, cannot process messages; lag grows to 50K+"
+    boundary_type: "service"
+    evidence_difficulty: "hard"
+    evidence_location: "kafka_consumer_lag"
+    branch: "B"
+
+  - hop: 12
+    component: "kafka-retention"
+    failure: "log.retention.hours=4 (cost optimization from 3 months ago); lag exceeds retention, messages dropped"
+    boundary_type: "infrastructure"
+    evidence_difficulty: "hard"
+    evidence_location: "kafka_config"
+    branch: "B"
+
+  - hop: 13
+    component: "accounting-offsets"
+    failure: "Consumer detects offset gap, logs WARN but continues (no backfill mechanism)"
+    boundary_type: "service"
+    evidence_difficulty: "medium"
+    evidence_location: "accounting_logs"
+    branch: "B"
+
+  - hop: 14
+    component: "accounting-database"
+    failure: "PostgreSQL revenue table missing 3 hours of order records"
+    boundary_type: "data"
+    evidence_difficulty: "medium"
+    evidence_location: "database_query"
+    branch: "B"
+
+  - hop: 15
+    component: "revenue-dashboard"
+    failure: "Grafana revenue dashboard shows $0 for the gap period; CFO sends urgent email"
+    boundary_type: "business_logic"
+    evidence_difficulty: "easy"
+    evidence_location: "slack"
+    branch: "B"
+
+  # =========================================================================
+  # BRANCH C: Observability Blindness (Hops 16-20) -- THE CRITICAL BRANCH
+  # =========================================================================
+  - hop: 16
+    component: "otel-collector-queue"
+    failure: "memory_limiter processor drops all incoming data to prevent OOM"
+    boundary_type: "infrastructure"
+    evidence_difficulty: "very_hard"
+    evidence_location: "collector_internal_metrics"
+    branch: "C"
+    significant_silence: true
+
+  - hop: 17
+    component: "prometheus"
+    failure: "Stale time series: no new samples. Alert rules using rate() return NaN. Alerts RESOLVE (false negative)."
+    boundary_type: "monitoring"
+    evidence_difficulty: "hard"
+    evidence_location: "prometheus_stale_markers"
+    branch: "C"
+
+  - hop: 18
+    component: "jaeger"
+    failure: "Traces are fragmented. Only partial spans visible. End-to-end request tracing impossible."
+    boundary_type: "monitoring"
+    evidence_difficulty: "hard"
+    evidence_location: "jaeger_ui"
+    branch: "C"
+
+  - hop: 19
+    component: "opensearch-logs"
+    failure: "Recent logs missing from OpenSearch. Last 2 hours are a hole."
+    boundary_type: "monitoring"
+    evidence_difficulty: "medium"
+    evidence_location: "log_search"
+    branch: "C"
+
+  - hop: 20
+    component: "investigation"
+    failure: "SRE wastes 45 min trying to debug with stale metrics and missing traces. Resolved alerts give false confidence."
+    boundary_type: "process"
+    evidence_difficulty: "medium"
+    evidence_location: "slack"
+    branch: "C"
+
+  # =========================================================================
+  # BRANCH D: Cart Emptying (Hops 21-25)
+  # =========================================================================
+  - hop: 21
+    component: "checkout-memory"
+    failure: "847+ goroutines push checkout memory toward 512MB container limit; GC pressure increases"
+    boundary_type: "runtime"
+    evidence_difficulty: "medium"
+    evidence_location: "pod_metrics"
+    branch: "D"
+
+  - hop: 22
+    component: "checkout-grpc"
+    failure: "GC pauses cause gRPC keepalive to timeout; cart service sees connection resets"
+    boundary_type: "network"
+    evidence_difficulty: "hard"
+    evidence_location: "cart_logs"
+    branch: "D"
+
+  - hop: 23
+    component: "cart-connection-pool"
+    failure: "Cart service (.NET) does not evict reset connections from pool; stale connections return empty"
+    boundary_type: "code"
+    evidence_difficulty: "hard"
+    evidence_location: "cart_source_code"
+    branch: "D"
+
+  - hop: 24
+    component: "cart-user-facing"
+    failure: "Customers see empty carts; re-add items and retry checkout"
+    boundary_type: "user_facing"
+    evidence_difficulty: "easy"
+    evidence_location: "support_tickets"
+    branch: "D"
+
+  - hop: 25
+    component: "cart-doom-loop"
+    failure: "Retries increase checkout load -> more goroutines -> more GC -> more connection resets -> more empty carts"
+    boundary_type: "amplification"
+    evidence_difficulty: "medium"
+    evidence_location: "metrics_correlation"
+    branch: "D"
+
+  # =========================================================================
+  # BRANCH E: Stale Recommendations (Hops 26-30)
+  # =========================================================================
+  - hop: 26
+    component: "recommendation-refresh"
+    failure: "Background catalog refresh thread fails due to gRPC metadata injection blocking (collector backpressure)"
+    boundary_type: "service"
+    evidence_difficulty: "hard"
+    evidence_location: "recommendation_logs"
+    branch: "E"
+
+  - hop: 27
+    component: "recommendation-model"
+    failure: "Falls back to stale cached model from 2 days ago; includes discontinued products"
+    boundary_type: "data"
+    evidence_difficulty: "medium"
+    evidence_location: "recommendation_logs"
+    branch: "E"
+
+  - hop: 28
+    component: "frontend-recommendations"
+    failure: "Recommended products include discontinued items; frontend shows 'product not found' for some"
+    boundary_type: "user_facing"
+    evidence_difficulty: "easy"
+    evidence_location: "sentry"
+    branch: "E"
+
+  - hop: 29
+    component: "ad-service"
+    failure: "Ad targeting uses stale recommendation data; fetches non-existent product categories -> NullPointerException"
+    boundary_type: "service"
+    evidence_difficulty: "easy"
+    evidence_location: "sentry"
+    branch: "E"
+
+  - hop: 30
+    component: "frontend-ads"
+    failure: "Blank ad slots on product pages; cumulative UX degradation (slow checkout + empty carts + bad recs + blank ads)"
+    boundary_type: "user_facing"
+    evidence_difficulty: "easy"
+    evidence_location: "frontend_metrics"
+    branch: "E"
+
+task_prompt: |
+  CRITICAL MULTI-TEAM INCIDENT
+
+  Multiple teams are reporting simultaneous issues that started 2-3 hours ago:
+
+  1. [CHECKOUT TEAM] Checkout success rate dropped to ~40%. Some customers
+     report being charged but order shows "failed." Multiple fraud auto-
+     suspensions from duplicate charges.
+
+  2. [FINANCE TEAM] Revenue dashboard shows $0 for the last 3 hours.
+     CFO asks "did all revenue stop?"
+
+  3. [PLATFORM TEAM] Dashboards show stale or missing data. Alert system
+     seems to have stopped firing. "Our monitoring might be broken."
+
+  4. [STOREFRONT TEAM] Customers report carts randomly becoming empty.
+     Cart pods were restarted 15 minutes ago -- issue returned immediately.
+
+  5. [PRODUCT TEAM] Recommendations showing discontinued products. Some
+     ad slots rendering blank on product pages.
+
+  No code deployments today. All services report healthy on health checks.
+  The last notable change was "some Kafka tuning" by an SRE 5 days ago.
+
+  Investigate, correlate these symptoms, find the root cause, and resolve.
+
+requirements:
+  languages: ["go", "rust", "python", "java", "typescript", "javascript", "ruby", "csharp"]
+  patterns:
+    - "kafka_consumer_groups"
+    - "kafka_producer"
+    - "goroutine_lifecycle"
+    - "connection_pooling"
+    - "otel_pipeline"
+    - "grpc_keepalive"
+    - "retry_logic"
+    - "consumer_lag"
+  infrastructure:
+    - "kafka"
+    - "valkey"
+    - "postgresql"
+    - "otel_collector"
+    - "prometheus"
+    - "jaeger"
+    - "opensearch"
+  min_services: 10
+
+red_herrings:
+  - source: "slack"
+    hypothesis: "Cart service has a bug (it was just restarted)"
+    why_wrong: "Cart restart temporarily fixed stale connections but root cause is upstream GC pressure"
+
+  - source: "metrics"
+    hypothesis: "Checkout needs more memory (approaching 512MB limit)"
+    why_wrong: "Increasing memory delays OOM but doesn't stop goroutine leak from Kafka producer"
+
+  - source: "slack"
+    hypothesis: "Monitoring is broken separately from the service issues"
+    why_wrong: "Monitoring degradation shares the same root cause (Kafka -> collector)"
+
+  - source: "sentry"
+    hypothesis: "Ad service NullPointerException is a code bug"
+    why_wrong: "Ad service code is correct; it's receiving stale data from recommendation service"
+
+  - source: "metrics"
+    hypothesis: "Kafka consumer lag is caused by slow accounting DB queries"
+    why_wrong: "Consumer can't even poll messages; it's stuck in perpetual rebalance"
+
+  - source: "slack"
+    hypothesis: "Monday traffic spike overwhelmed checkout capacity"
+    why_wrong: "Traffic is 2x normal (handled fine before); the Kafka config change made it fragile"
+
+  - source: "git"
+    hypothesis: "Recent Go dependency bump caused a regression"
+    why_wrong: "Dependency bump was merged 3 days ago with no issues; Kafka config is 5 days ago"
+
+shallow_fixes:
+  - fix: "Restart checkout pods"
+    why_fails: "Temporarily clears goroutines but Kafka producer will block again within minutes"
+
+  - fix: "Restart cart pods"
+    why_fails: "Fresh connections work briefly but GC pressure from checkout causes resets again"
+
+  - fix: "Increase checkout memory limit to 2GB"
+    why_fails: "Delays OOM but goroutines keep accumulating; problem grows slower but still grows"
+
+  - fix: "Increase Kafka consumer max.poll.interval.ms"
+    why_fails: "Partial fix; reduces rebalance frequency but doesn't address the batch size/timeout mismatch"
+
+  - fix: "Restart OTel Collector"
+    why_fails: "Collector restarts but immediately backs up again because Kafka exporter can't write"
+
+  - fix: "Manually reprocess accounting data gap"
+    why_fails: "Messages may have already fallen off retention; backfill needs source data"
+
+difficulty:
+  estimated_human_time_hours: 16
+  frontier_model_pass_rate_percent: 5
+  hop_count: 30
+  branch_count: 5
+  complexity_factors:
+    - "30 hops across 5 independent failure branches"
+    - "Observability tools are themselves degraded (Branch C)"
+    - "Resolved alerts give false confidence"
+    - "5 teams see 5 different symptoms -- must correlate as one incident"
+    - "2 failed recovery attempts (cart restart, memory increase)"
+    - "3 doom loops (rebalance storm, cart retries, monitoring false negatives)"
+    - "Root cause commit was 5 days ago, triggered by traffic pattern"
+    - "Kafka rebalance storms are poorly understood even by senior engineers"
+    - "OTel Collector dropping data is invisible (no errors, just missing data)"
+    - "Requires understanding Kafka internals, Go runtime, OTel pipeline simultaneously"
+
+failure_modes:
+  common:
+    - mode: "Treat as 5 separate incidents"
+      description: "Investigates each branch independently without correlating"
+      detection: "Separate investigation threads without finding shared root cause"
+      branches_reached: ["A", "B", "C", "D", "E"]
+
+    - mode: "Blame checkout code"
+      description: "Focuses on checkout goroutine leak as the root cause"
+      detection: "Fixes checkout without investigating Kafka"
+      branches_reached: ["A"]
+
+    - mode: "Restart everything"
+      description: "Restarts all services hoping the issue resolves"
+      detection: "Multiple restart commands without investigation"
+      branches_reached: []
+
+    - mode: "Fix monitoring first"
+      description: "Spends all time fixing OTel Collector without realizing it shares root cause"
+      detection: "Collector investigation without connecting to Kafka"
+      branches_reached: ["C"]
+
+  subtle:
+    - mode: "Find Kafka lag but blame slow consumers"
+      description: "Sees consumer lag but attributes to slow processing, not rebalance storm"
+      detection: "Increases consumer resources without checking rebalance metrics"
+      branches_reached: ["B"]
+
+    - mode: "Find rebalance but wrong config fix"
+      description: "Identifies rebalance storm but only increases session.timeout.ms without fixing batch size"
+      detection: "Partial config fix that reduces frequency but doesn't eliminate the storm"
+      branches_reached: ["A", "B"]
+
+golden_path:
+  overview: |
+    An expert engineer correlates the 5 symptom branches, realizes
+    monitoring is degraded (making investigation harder), traces the
+    shared dependency to Kafka, identifies the rebalance storm, and
+    connects it to the consumer config change from 5 days ago. The key
+    insight is that all branches share a Kafka dependency and the
+    observability blindness is itself caused by the same root cause.
+
+  steps:
+    - step: 1
+      action: "Read all team reports, recognize this is ONE incident with 5 symptoms"
+      tools: ["slack.read_channel('#incidents')"]
+      evidence: "5 teams reporting simultaneously -> shared root cause likely"
+      time_estimate_minutes: 10
+
+    - step: 2
+      action: "Realize monitoring is broken (Branch C)"
+      tools: ["prometheus_query", "jaeger"]
+      evidence: "Stale metrics, fragmented traces, missing logs"
+      key_insight: "Cannot trust current dashboards -- must find alternative data sources"
+      time_estimate_minutes: 15
+
+    - step: 3
+      action: "Check OTel Collector status"
+      tools: ["collector logs", "collector internal metrics"]
+      evidence: "memory_limiter dropping data, Kafka exporter backing up"
+      key_insight: "Collector is backed up because its Kafka exporter can't write"
+      time_estimate_minutes: 10
+
+    - step: 4
+      action: "Check Kafka cluster health"
+      tools: ["kafka metrics", "kafka logs"]
+      evidence: "Consumer group in perpetual rebalance, broker partition leader elections"
+      key_insight: "Kafka rebalance storm is the shared infrastructure failure"
+      time_estimate_minutes: 15
+
+    - step: 5
+      action: "Understand why rebalance storm started"
+      tools: ["kafka consumer config", "traffic metrics"]
+      evidence: "max.poll.records=500 + session.timeout.ms=6s + Monday 2x traffic = poll interval exceeded"
+      time_estimate_minutes: 15
+
+    - step: 6
+      action: "Find the config change"
+      tools: ["git log", "slack search"]
+      evidence: "SRE commit from 5 days ago: 'perf: tune Kafka consumer for lower latency'"
+      key_insight: "Config was fine under normal load but fragile under 2x spike"
+      time_estimate_minutes: 10
+
+    - step: 7
+      action: "Trace how Kafka instability cascades to each branch"
+      tools: ["code review", "service dependencies"]
+      evidence: "Kafka -> checkout producer blocks -> goroutines -> HTTP pool -> shipping/email/cart/recs"
+      time_estimate_minutes: 20
+
+    - step: 8
+      action: "Fix: revert Kafka consumer config, restart affected services in order"
+      verification: |
+        Revert session.timeout.ms to 30s and max.poll.records to 100.
+        Restart accounting consumers (clears rebalance state).
+        Restart checkout pods (clears goroutine backlog).
+        Verify OTel Collector recovers (Kafka exporter succeeds).
+        Verify Prometheus receives fresh metrics.
+        Verify cart connections reset to healthy state.
+        Verify recommendation model refreshes.
+        Investigate accounting data gap and plan backfill from source.
+        Increase log.retention.hours from 4 to 24 to prevent future data loss.
+      time_estimate_minutes: 45
+
+grading:
+  total_weight: 1.0
+
+  understanding:
+    - criterion: "Correlated 5 symptoms as one incident"
+      weight: 0.05
+    - criterion: "Identified observability degradation (Branch C)"
+      weight: 0.08
+    - criterion: "Connected OTel Collector to Kafka dependency"
+      weight: 0.05
+    - criterion: "Identified Kafka rebalance storm"
+      weight: 0.10
+    - criterion: "Found consumer config change as trigger"
+      weight: 0.10
+    - criterion: "Understood Monday traffic pattern interaction"
+      weight: 0.05
+    - criterion: "Traced checkout goroutine leak to Kafka producer"
+      weight: 0.05
+    - criterion: "Connected cart emptying to GC pressure cascade"
+      weight: 0.03
+    - criterion: "Identified accounting data loss from retention"
+      weight: 0.03
+    - criterion: "Connected stale recommendations to collector backpressure"
+      weight: 0.03
+
+  outcome_based:
+    - criterion: "Reverted Kafka consumer config"
+      weight: 0.10
+    - criterion: "Checkout success rate restored"
+      weight: 0.05
+    - criterion: "Monitoring pipeline recovered"
+      weight: 0.05
+    - criterion: "Cart service functioning"
+      weight: 0.03
+    - criterion: "Recommendations refreshed"
+      weight: 0.02
+    - criterion: "Identified accounting data gap and proposed recovery"
+      weight: 0.05
+
+  communication:
+    - criterion: "Incident report covers all 5 branches and shared root cause"
+      weight: 0.08
+
+  collateral:
+    - criterion: "Did not make things worse (no destructive actions)"
+      weight: 0.03
+    - criterion: "Proposed increasing Kafka retention to prevent data loss"
+      weight: 0.02
+
+hints:
+  progressive:
+    - level: 1
+      trigger_condition: "no_progress_minutes >= 45"
+      content: "Five teams are seeing different symptoms simultaneously. What do all affected services have in common? Check their shared dependencies."
+
+    - level: 2
+      trigger_condition: "no_progress_minutes >= 90"
+      content: "Your monitoring tools may not be showing current data. Check if the OTel Collector is healthy -- it feeds Prometheus, Jaeger, and log storage."
+
+    - level: 3
+      trigger_condition: "no_progress_minutes >= 120"
+      content: "The OTel Collector exports to Kafka. The accounting service consumes from Kafka. The checkout service produces to Kafka. Is Kafka healthy?"
+
+    - level: 4
+      trigger_condition: "no_progress_minutes >= 150"
+      content: "Check the Kafka consumer group state. Are consumers able to poll? Look at rebalance frequency and consumer lag. Then check git for recent Kafka config changes."
+
+environment:
+  services:
+    - name: "checkout-service"
+      language: "go"
+    - name: "shipping-service"
+      language: "rust"
+    - name: "recommendation-service"
+      language: "python"
+    - name: "product-reviews"
+      language: "python"
+    - name: "ad-service"
+      language: "java"
+    - name: "cart-service"
+      language: "csharp"
+    - name: "payment-service"
+      language: "javascript"
+    - name: "email-service"
+      language: "ruby"
+    - name: "frontend"
+      language: "typescript"
+    - name: "accounting-service"
+      language: "csharp"
+    - name: "otel-collector"
+      config: "exports to Kafka, Prometheus, Jaeger"
+    - name: "kafka"
+      config: "log.retention.hours=4"
+    - name: "valkey"
+    - name: "postgresql"
+    - name: "flagd"
+
+related_incidents:
+  - url: "https://about.roblox.com/newsroom/2022/01/roblox-return-to-service-10-28-10-31-2021"
+    title: "Roblox 73-hour outage (Oct 2021)"
+    relevance: "Consul streaming + BoltDB pathology -> monitoring blind, 3 failed recovery attempts"
+
+  - url: "https://aws.amazon.com/message/12721/"
+    title: "AWS US-EAST-1 outage (Dec 2021)"
+    relevance: "Internal network congestion -> retry storm -> monitoring blind -> misdiagnosis"
+
+  - url: "https://engineering.fb.com/2021/10/05/networking-traffic/outage-details/"
+    title: "Meta/Facebook outage (Oct 2021)"
+    relevance: "Self-referential infrastructure: tools to fix depend on broken system"
+
+tags:
+  - "cascading-failure"
+  - "kafka-rebalance"
+  - "consumer-storm"
+  - "observability-blindness"
+  - "multi-branch"
+  - "30-hop"
+  - "doom-loops"
+  - "failed-recovery"
+  - "self-referential-infrastructure"
+  - "temporal-displacement"
+  - "5-branch-tree"

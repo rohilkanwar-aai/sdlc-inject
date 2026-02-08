@@ -1,0 +1,443 @@
+id: CASCADE-010
+version: "2.0"
+name: "DST cron double-fire -> duplicate ETL -> temp table collision -> partial overwrite -> materialized view corruption -> dashboard anomaly -> executive decision based on bad data -> contract cancelled"
+category: "Cascading Failures"
+subcategory: "Temporal + Business Logic Chains"
+
+sdlc_phases:
+  primary: "Debugging"
+  secondary: ["Maintenance", "Verification"]
+
+description: |
+  A 9-hop cascading failure triggered by a Daylight Saving Time transition.
+  The nightly ETL cron job (scheduled at 2:00 AM) fires twice when clocks
+  fall back -- once at 2:00 AM EDT, and again at 2:00 AM EST (the "repeated"
+  hour). The second execution's temp table (named with date suffix) collides
+  with the first's still-running transaction, causing a partial overwrite via
+  INSERT ON CONFLICT DO UPDATE. The corrupted temp table feeds into a
+  materialized view refresh. The executive dashboard shows a 34% revenue
+  drop that didn't actually happen. The CFO, acting on this data during a
+  board meeting, pauses a major vendor contract. The vendor, interpreting
+  the pause as a breach, terminates the relationship.
+
+  The agent sees: "Our primary vendor terminated our contract citing 'breach'
+  and the CFO says revenue dropped 34% based on yesterday's dashboard."
+  The root cause is: Cron double-fire during DST fallback, 9 hops away.
+
+  Critical insight: The ETL job "succeeded" both times. The temp table
+  collision produced valid-looking data (no errors). The revenue drop is
+  real in the dashboard but not in reality. By the time the agent investigates,
+  the DST transition was 3 days ago and the cron logs look normal because
+  both runs completed successfully.
+
+causal_chain:
+  - hop: 1
+    component: "cron-scheduler"
+    failure: "2:00 AM cron fires twice during DST fall-back (EDT->EST)"
+    boundary_type: "temporal"
+    evidence_difficulty: "very_hard"
+    evidence_location: "cron_logs"
+    temporal_gap: "3 days ago"
+    significant_silence: true  # Both runs show "success"
+
+  - hop: 2
+    component: "etl-job"
+    failure: "Second instance starts while first is still running"
+    boundary_type: "process"
+    evidence_difficulty: "very_hard"
+    evidence_location: "job_pid_logs"
+    insight: "No mutex/lockfile prevents concurrent runs"
+
+  - hop: 3
+    component: "temp-table"
+    failure: "Both instances write to etl_staging_20241103, INSERT ON CONFLICT overwrites"
+    boundary_type: "data"
+    evidence_difficulty: "hard"
+    evidence_location: "database_audit"
+    insight: "Second run partially overwrites first run's data"
+
+  - hop: 4
+    component: "etl-staging"
+    failure: "Staging table has mix of run-1 and run-2 data with different aggregation windows"
+    boundary_type: "data"
+    evidence_difficulty: "hard"
+    evidence_location: "data_comparison"
+
+  - hop: 5
+    component: "materialized-view"
+    failure: "REFRESH MATERIALIZED VIEW reads corrupted staging data"
+    boundary_type: "data"
+    evidence_difficulty: "medium"
+    evidence_location: "matview_contents"
+
+  - hop: 6
+    component: "dashboard"
+    failure: "Executive revenue dashboard shows 34% drop (double-counted some, missed others)"
+    boundary_type: "business_logic"
+    evidence_difficulty: "easy"
+    evidence_location: "dashboard_query"
+
+  - hop: 7
+    component: "executive-decision"
+    failure: "CFO presents 34% revenue drop at board meeting"
+    boundary_type: "business"
+    evidence_difficulty: "easy"
+    evidence_location: "meeting_notes"
+
+  - hop: 8
+    component: "vendor-contract"
+    failure: "CFO pauses vendor payments pending investigation"
+    boundary_type: "business"
+    evidence_difficulty: "easy"
+    evidence_location: "email"
+
+  - hop: 9
+    component: "vendor-relationship"
+    failure: "Vendor treats payment pause as contract breach, terminates"
+    boundary_type: "legal"
+    evidence_difficulty: "easy"
+    evidence_location: "legal_email"
+
+task_prompt: |
+  We have a critical situation that spans technical and business domains.
+
+  1. Our primary logistics vendor (ShipFast) sent a termination notice
+     yesterday, citing "material breach of payment terms" in our contract.
+     They say we paused payments without notice.
+
+  2. The CFO paused payments 2 days ago because the executive dashboard
+     showed a 34% quarter-over-quarter revenue decline. "We can't commit
+     to vendor contracts if revenue dropped this much."
+
+  3. The sales team says "that's impossible -- we GREW 12% this quarter."
+
+  4. Finance confirms Stripe shows $4.2M collected, but our dashboard
+     shows $2.8M.
+
+  We need to:
+  - Determine whether revenue actually dropped or if the dashboard is wrong
+  - If wrong, find the root cause and fix it
+  - Prepare evidence for ShipFast to reverse the termination
+
+  This is existential -- ShipFast handles 70% of our fulfillment.
+
+requirements:
+  languages: ["python", "typescript", "sql"]
+  patterns:
+    - "cron_scheduling"
+    - "etl_pipeline"
+    - "materialized_view"
+    - "timezone_handling"
+    - "data_pipeline"
+  infrastructure:
+    - "postgres"
+    - "cron"
+    - "metabase"
+  min_services: 3
+
+evidence_map:
+  # Hop 9: Vendor termination (EASY)
+  - hop: 9
+    source: "email"
+    tool: "Read /var/mail/legal/shipfast_termination.eml"
+    evidence: "ShipFast terminates contract citing non-payment as material breach"
+    reveals: "Business relationship at risk"
+    points_toward: "Why were payments paused?"
+
+  # Hop 8: Payment pause (EASY)
+  - hop: 8
+    source: "email"
+    tool: "email_search('shipfast payment pause')"
+    evidence: "CFO email: 'Pausing all non-essential vendor payments pending revenue review'"
+    reveals: "Payments paused based on dashboard revenue numbers"
+
+  # Hop 7: CFO board meeting (EASY)
+  - hop: 7
+    source: "slack"
+    tool: "slack_get_messages('#exec-finance')"
+    evidence: "CFO: 'Dashboard shows 34% QoQ decline. We need to cut costs immediately.'"
+    reveals: "Executive action taken based on dashboard data"
+    points_toward: "Is the dashboard data correct?"
+
+  # Hop 6: Dashboard shows wrong revenue (MEDIUM)
+  - hop: 6
+    source: "dashboard"
+    tool: "bash: psql -c \"SELECT SUM(revenue) FROM dashboard_revenue_summary WHERE quarter='2024-Q4'\""
+    evidence: "$2,847,293 (dashboard) vs $4,200,000 (Stripe)"
+    reveals: "Dashboard underreports revenue by $1.35M"
+    points_toward: "Dashboard reads from materialized view -- is the view wrong?"
+
+  # Hop 5: Materialized view corruption (MEDIUM)
+  - hop: 5
+    source: "database"
+    tool: "bash: psql -c \"SELECT refresh_date, row_count FROM pg_stat_user_tables WHERE relname='mv_revenue_daily'\""
+    evidence: "Last refreshed Nov 3, row_count=847 (expected ~1200 for full quarter)"
+    reveals: "Materialized view is missing ~30% of rows"
+    points_toward: "View refreshed from staging table -- is staging data complete?"
+
+  - hop: 5
+    source: "database"
+    tool: "bash: psql -c \"SELECT date, SUM(amount) FROM mv_revenue_daily WHERE date='2024-11-03' GROUP BY date\""
+    evidence: "$47,283 (matview) vs $127,439 (raw transactions)"
+    reveals: "November 3 data specifically is wrong"
+    temporal_clue: "November 3 = DST fall-back date"
+
+  # Hop 4: Staging table data corruption (HARD)
+  - hop: 4
+    source: "database"
+    tool: "bash: psql -c \"SELECT COUNT(*), COUNT(DISTINCT source_run_id) FROM etl_staging_20241103\""
+    evidence: "8,247 rows from TWO different run IDs (run-001 and run-002)"
+    reveals: "Staging table was written by two different ETL runs"
+    key_insight: "Two runs wrote to the same staging table"
+
+  - hop: 4
+    source: "database"
+    tool: "bash: psql -c \"SELECT source_run_id, COUNT(*), SUM(amount) FROM etl_staging_20241103 GROUP BY source_run_id\""
+    evidence: |
+      run-001: 5,847 rows, $89,283  (partial -- overwritten)
+      run-002: 2,400 rows, $38,156  (partial -- second window)
+    reveals: "Run-002 partially overwrote run-001 via ON CONFLICT"
+    key_insight: "Neither run has complete data; it's a Frankenstein table"
+
+  # Hop 3: Temp table collision (HARD)
+  - hop: 3
+    source: "source_code"
+    tool: "Read etl/daily_revenue.py"
+    evidence: |
+      table_name = f"etl_staging_{date.today().strftime('%Y%m%d')}"
+      # ...
+      INSERT INTO {table_name} (transaction_id, amount, ...)
+      ON CONFLICT (transaction_id) DO UPDATE SET amount = EXCLUDED.amount
+    reveals: "Table name based on date -- both runs on Nov 3 use same table"
+    key_insight: "ON CONFLICT overwrites run-1 data with run-2 data"
+
+  - hop: 3
+    source: "source_code"
+    tool: "Read etl/daily_revenue.py"
+    evidence: |
+      # Each run processes a 24-hour window ending at run time
+      end_time = datetime.now()
+      start_time = end_time - timedelta(hours=24)
+    reveals: "Run-2 processes different window than run-1 due to clock change"
+
+  # Hop 2: Double execution (VERY HARD)
+  - hop: 2
+    source: "logs"
+    tool: "bash: grep 'daily_revenue' /var/log/cron/etl.log | grep '2024-11-03'"
+    evidence: |
+      2024-11-03 02:00:00 EDT: Starting daily_revenue [pid=12847]
+      2024-11-03 02:00:00 EST: Starting daily_revenue [pid=12903]
+      2024-11-03 02:47:00 EST: Completed daily_revenue [pid=12847] SUCCESS
+      2024-11-03 02:42:00 EST: Completed daily_revenue [pid=12903] SUCCESS
+    reveals: "Two runs started at '2:00 AM' -- one EDT, one EST"
+    key_insight: "Both succeeded, both show SUCCESS -- very easy to miss"
+
+  - hop: 2
+    source: "system"
+    tool: "bash: ls -la /var/run/etl/daily_revenue.lock"
+    evidence: "File does not exist"
+    reveals: "No lockfile mechanism prevents concurrent runs"
+
+  # Hop 1: DST cron behavior (VERY HARD)
+  - hop: 1
+    source: "cron"
+    tool: "bash: crontab -l | grep daily_revenue"
+    evidence: "0 2 * * * /opt/etl/daily_revenue.py"
+    reveals: "Cron runs at 2:00 AM local time"
+
+  - hop: 1
+    source: "system"
+    tool: "bash: cat /etc/timezone"
+    evidence: "America/New_York"
+    reveals: "System timezone observes DST"
+    root_cause: "DST fall-back causes 2:00 AM to occur twice"
+
+  - hop: 1
+    source: "reference"
+    description: |
+      On November 3, 2024 at 2:00 AM EDT, clocks fall back to 1:00 AM EST.
+      Cron fires at 2:00 AM EDT (first time), then 2:00 AM EST (second time).
+      Both runs use date 2024-11-03 for the staging table name.
+      No mutex prevents concurrent execution.
+
+red_herrings:
+  - source: "slack"
+    message: "Maybe Stripe has a reporting bug?"
+    why_wrong: "Stripe matches bank settlements; our data is wrong"
+
+  - source: "recent_changes"
+    message: "We updated the dashboard query last week"
+    why_wrong: "Query is correct; it faithfully reads corrupted data"
+
+  - source: "etl_logs"
+    message: "ETL shows SUCCESS for Nov 3"
+    why_wrong: "Both runs succeeded -- that's the problem. Two successes = one corruption"
+
+  - source: "slack"
+    message: "The matview refresh script has a bug"
+    why_wrong: "Refresh works correctly -- it reads from a corrupted source"
+
+  - source: "database"
+    message: "Maybe Postgres had a replication delay"
+    why_wrong: "Single-primary setup, no replication involved"
+
+  - source: "finance"
+    message: "Could be a forex/currency conversion issue"
+    why_wrong: "All transactions are in USD, no conversion needed"
+
+shallow_fixes:
+  - fix: "Manually correct the dashboard numbers"
+    why_fails: "Next ETL run during DST transition will corrupt again"
+    detection: "Dashboard SQL edits without ETL fix"
+
+  - fix: "Refresh the materialized view"
+    why_fails: "View reads from corrupted staging table; refresh = same bad data"
+    detection: "REFRESH MATERIALIZED VIEW without staging fix"
+
+  - fix: "Drop and re-create the staging table"
+    why_fails: "Without fixing cron or adding mutex, it'll happen again"
+    detection: "Table recreation without cron/concurrency fix"
+
+  - fix: "Switch cron to UTC"
+    why_fails: "Partial fix; still needs mutex and data recovery"
+    detection: "Cron config change without data recovery"
+
+difficulty:
+  estimated_human_time_hours: 8
+  frontier_model_pass_rate_percent: 5
+  hop_count: 9
+  complexity_factors:
+    - "9 hops including business/legal consequences"
+    - "DST edge case is extremely non-obvious"
+    - "Both ETL runs show SUCCESS"
+    - "Root cause was 3 days ago"
+    - "Data corruption looks like real revenue decline"
+    - "ON CONFLICT produces valid-looking but wrong data"
+    - "Requires understanding cron + timezone + DST interaction"
+    - "Business urgency (vendor termination) distracts from root cause"
+    - "CFO already acted on bad data -- now it's a legal problem too"
+
+failure_modes:
+  common:
+    - mode: "Assume revenue actually dropped"
+      description: "Tries to explain the revenue decline as real"
+      detection: "Financial analysis without data validation"
+      hop_reached: 7
+
+    - mode: "Blame dashboard query"
+      description: "Assumes the dashboard SQL is wrong"
+      detection: "Dashboard query investigation without checking source data"
+      hop_reached: 6
+
+    - mode: "Focus on vendor negotiation"
+      description: "Tries to fix business problem without finding technical cause"
+      detection: "Legal/business actions without data investigation"
+      hop_reached: 9
+
+  subtle:
+    - mode: "Find staging corruption but blame ETL logic"
+      description: "Sees two run IDs but assumes ETL bug, not double-fire"
+      detection: "ETL code review without checking execution history"
+      hop_reached: 4
+
+    - mode: "Find double execution but wrong cause"
+      description: "Discovers two runs but blames cron daemon bug"
+      detection: "Cron restart/reinstall without DST investigation"
+      hop_reached: 2
+
+    - mode: "Fix cron but not data"
+      description: "Adds lockfile but doesn't recover Nov 3 data"
+      detection: "Cron concurrency fix without data recovery"
+      hop_reached: 1
+
+golden_path:
+  steps:
+    - step: 1
+      action: "Verify the revenue discrepancy"
+      tools: ["psql dashboard query", "Stripe API"]
+      evidence: "Dashboard: $2.8M, Stripe: $4.2M. Dashboard is wrong."
+      hop: 6-9
+
+    - step: 2
+      action: "Find when the discrepancy originated"
+      tools: ["psql daily revenue comparison"]
+      evidence: "Nov 3 data is specifically wrong"
+      key_insight: "What happened on November 3?"
+      hop: 5
+
+    - step: 3
+      action: "Examine the staging table for Nov 3"
+      tools: ["psql staging table analysis"]
+      evidence: "Two different run IDs, partial data from each"
+      key_insight: "Staging table was written by two ETL runs"
+      hop: 4
+
+    - step: 4
+      action: "Check ETL execution history for Nov 3"
+      tools: ["cron logs"]
+      evidence: "Two runs at '2:00 AM' -- one EDT, one EST"
+      key_insight: "DST fall-back caused double-fire"
+      hop: 2
+
+    - step: 5
+      action: "Confirm cron timezone behavior"
+      tools: ["crontab", "/etc/timezone"]
+      evidence: "System uses America/New_York, 2 AM cron fires twice on fall-back"
+      hop: 1
+
+    - step: 6
+      action: "Understand the data corruption mechanism"
+      tools: ["ETL source code"]
+      evidence: "ON CONFLICT DO UPDATE + same table name = partial overwrite"
+      hop: 3
+
+    - step: 7
+      action: "Remediate: fix data, fix cron, fix business"
+      verification: |
+        Re-run ETL for Nov 3 with correct data. Add lockfile/mutex to ETL. Switch cron to UTC or use flock. Refresh materialized view. Provide corrected revenue report to CFO. Prepare evidence package for ShipFast.
+
+grading:
+  total_weight: 1.0
+
+  understanding:
+    - criterion: "Identified dashboard reads from corrupted matview"
+      weight: 0.08
+    - criterion: "Found staging table had two run IDs"
+      weight: 0.10
+    - criterion: "Discovered double ETL execution on Nov 3"
+      weight: 0.10
+    - criterion: "Connected to DST fall-back causing cron double-fire"
+      weight: 0.10
+    - criterion: "Understood ON CONFLICT partial overwrite mechanism"
+      weight: 0.08
+
+  outcome_based:
+    - criterion: "Recovered correct Nov 3 data"
+      weight: 0.12
+    - criterion: "Added concurrency protection to ETL (lockfile/flock)"
+      weight: 0.08
+    - criterion: "Fixed cron to use UTC or avoid DST window"
+      weight: 0.05
+    - criterion: "Refreshed materialized view with correct data"
+      weight: 0.05
+    - criterion: "Produced corrected revenue report"
+      weight: 0.08
+
+  communication:
+    - criterion: "Prepared evidence package for vendor (ShipFast)"
+      weight: 0.08
+    - criterion: "Incident report covers full 9-hop chain"
+      weight: 0.08
+
+tags:
+  - "cascading-failure"
+  - "dst-timezone"
+  - "cron-double-fire"
+  - "etl-corruption"
+  - "materialized-view"
+  - "business-impact"
+  - "9-hop"
+  - "temporal-edge-case"
+  - "significant-silence"
+  - "data-integrity"
+  - "legal-consequences"

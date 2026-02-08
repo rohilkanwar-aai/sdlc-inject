@@ -1,0 +1,519 @@
+id: CASCADE-011
+version: "2.0"
+name: "Kernel TCP tuning -> gRPC stream truncation -> partial protobuf delivery -> state machine invalid transition -> webhook idempotency bypass -> partner double-fulfillment -> inventory negative -> storefront blackout"
+category: "Cascading Failures"
+subcategory: "Networking + Protocol Chains"
+
+sdlc_phases:
+  primary: "Debugging"
+  secondary: ["Maintenance", "Verification", "Deployment"]
+
+description: |
+  An 8-hop cascading failure originating from a routine kernel network tuning
+  change. An SRE reduced net.ipv4.tcp_wmem max value from 16MB to 4MB as part
+  of a memory optimization initiative. For most HTTP/1.1 traffic this is fine,
+  but gRPC streams carrying large order-batch payloads (>4MB) are silently
+  truncated at the TCP layer. The gRPC client receives a partial protobuf
+  message that happens to parse successfully (because protobuf is forward-
+  compatible and silently ignores truncated trailing fields). The order-
+  processing state machine receives valid-looking but incomplete order data
+  (missing the "hold_for_review" flag on high-value orders). These orders
+  skip review and trigger webhooks to fulfillment partners. The webhook
+  payload includes a batch of orders, and the partner processes them. But
+  the order service, detecting the incomplete state later, re-sends the
+  webhook. The partner, receiving what looks like a NEW batch (different
+  timestamp = different idempotency key), fulfills again. Inventory goes
+  negative. The storefront circuit breaker trips, taking the site offline.
+
+  The agent sees: "Storefront is offline. Circuit breaker tripped on
+  inventory service. Multiple partners report double-shipments."
+  The root cause is: A sysctl tcp_wmem change from 2 weeks ago, 8 hops away.
+
+  Critical insight: The gRPC calls show no errors. Status is OK. The partial
+  message parses successfully. The truncation is invisible to application-
+  layer monitoring. The only signal is that large batch payloads lost their
+  trailing fields -- and protobuf doesn't complain about missing optional
+  fields.
+
+causal_chain:
+  - hop: 1
+    component: "kernel-tcp"
+    failure: "sysctl net.ipv4.tcp_wmem max reduced from 16MB to 4MB"
+    boundary_type: "infrastructure"
+    evidence_difficulty: "very_hard"
+    evidence_location: "sysctl.conf"
+    temporal_gap: "2 weeks ago"
+    significant_silence: true  # No kernel errors
+
+  - hop: 2
+    component: "grpc-stream"
+    failure: "Large batch payloads (>4MB) silently truncated at TCP layer"
+    boundary_type: "network"
+    evidence_difficulty: "very_hard"
+    evidence_location: "tcpdump_analysis"
+    significant_silence: true  # gRPC status OK
+
+  - hop: 3
+    component: "protobuf-deserialization"
+    failure: "Truncated protobuf parses successfully, trailing optional fields missing"
+    boundary_type: "protocol"
+    evidence_difficulty: "very_hard"
+    evidence_location: "field_comparison"
+    significant_silence: true  # No parse errors
+    insight: "Protobuf silently drops unknown/missing optional fields"
+
+  - hop: 4
+    component: "order-state-machine"
+    failure: "Missing hold_for_review flag = orders auto-approved"
+    boundary_type: "business_logic"
+    evidence_difficulty: "hard"
+    evidence_location: "order_audit_trail"
+
+  - hop: 5
+    component: "webhook-dispatch"
+    failure: "Auto-approved orders trigger fulfillment webhooks immediately"
+    boundary_type: "service"
+    evidence_difficulty: "medium"
+    evidence_location: "webhook_logs"
+
+  - hop: 6
+    component: "partner-fulfillment"
+    failure: "Partner receives and processes order batch"
+    boundary_type: "external"
+    evidence_difficulty: "medium"
+    evidence_location: "partner_api_logs"
+
+  - hop: 7
+    component: "webhook-retry"
+    failure: "Order service detects incomplete state, re-sends webhook with new timestamp"
+    boundary_type: "service"
+    evidence_difficulty: "medium"
+    evidence_location: "webhook_retry_logs"
+    insight: "Different timestamp = different idempotency key = partner processes AGAIN"
+
+  - hop: 8
+    component: "inventory + storefront"
+    failure: "Double fulfillment drives inventory negative, circuit breaker trips"
+    boundary_type: "business_logic"
+    evidence_difficulty: "easy"
+    evidence_location: "circuit_breaker_logs"
+
+task_prompt: |
+  CRITICAL OUTAGE: Storefront is offline.
+
+  At 09:15 this morning, the storefront circuit breaker tripped due to
+  inventory service failures. The site has been down for 45 minutes.
+
+  Simultaneously, we're receiving calls from three fulfillment partners
+  (ShipCo, FastFreight, PackLogic) reporting they received duplicate
+  order batches and have already shipped double quantities.
+
+  Timeline:
+  - 08:00: Nightly batch order processing completed "successfully"
+  - 08:30: Partners begin processing fulfillment
+  - 09:00: Partners report "we got the same orders twice"
+  - 09:15: Inventory service returns negative stock for 847 SKUs
+  - 09:16: Circuit breaker trips, storefront offline
+
+  The batch processing team says "our job completed with zero errors."
+  The webhook team says "all webhooks returned 200."
+
+  This is a P0 -- the site is down AND we're shipping double to customers.
+
+requirements:
+  languages: ["go", "rust", "java", "python"]
+  patterns:
+    - "grpc_streaming"
+    - "protobuf"
+    - "state_machine"
+    - "webhook"
+    - "circuit_breaker"
+    - "idempotency"
+  infrastructure:
+    - "linux_kernel"
+    - "kubernetes"
+    - "haproxy"
+  min_services: 5
+
+evidence_map:
+  # Hop 8: Circuit breaker + negative inventory (EASY - starting point)
+  - hop: 8
+    source: "sentry"
+    tool: "sentry_list_issues(project='storefront')"
+    evidence: "CircuitBreakerOpen: inventory_service health check failed, 847 SKUs with negative stock"
+    reveals: "Inventory has impossible negative values"
+    points_toward: "How did inventory go negative?"
+
+  - hop: 8
+    source: "metrics"
+    tool: "prometheus_query('inventory_stock_level < 0')"
+    evidence: "847 SKUs below zero, range from -1 to -47"
+    reveals: "Double-deduction of inventory"
+
+  # Hop 7: Double webhook delivery (MEDIUM)
+  - hop: 7
+    source: "logs"
+    tool: "bash: grep 'webhook.*fulfillment' /var/log/order-service/app.log | grep 'batch-20241128'"
+    evidence: |
+      08:02:00 Webhook sent: batch-20241128 -> ShipCo [idempotency_key=batch-20241128-1732780920]
+      08:47:00 Webhook sent: batch-20241128 -> ShipCo [idempotency_key=batch-20241128-1732783620]
+    reveals: "Same batch sent twice with DIFFERENT idempotency keys"
+    key_insight: "Different timestamps produce different idempotency keys"
+
+  - hop: 7
+    source: "source_code"
+    tool: "Read order-service/pkg/webhooks/dispatch.go"
+    evidence: |
+      func buildIdempotencyKey(batchID string) string {
+          return fmt.Sprintf("%s-%d", batchID, time.Now().Unix())
+      }
+    reveals: "Idempotency key includes timestamp -- re-send = new key"
+    key_insight: "Idempotency is broken for retries"
+
+  # Hop 6: Partner processed both (MEDIUM)
+  - hop: 6
+    source: "partner_api"
+    tool: "bash: curl -s 'https://api.shipco.io/batches?order_batch=batch-20241128' -H 'Authorization: Bearer $TOKEN'"
+    evidence: |
+      [
+        {"batch_ref": "SC-001", "received": "08:02", "status": "shipped", "items": 2847},
+        {"batch_ref": "SC-002", "received": "08:47", "status": "shipped", "items": 2847}
+      ]
+    reveals: "Partner shipped same orders twice"
+
+  # Hop 5: Orders auto-approved without review (HARD)
+  - hop: 5
+    source: "database"
+    tool: "bash: psql -c \"SELECT order_id, hold_for_review, approved_at, review_notes FROM orders WHERE batch_id='batch-20241128' AND amount > 500 LIMIT 20\""
+    evidence: "hold_for_review=false for ALL high-value orders (should be true for amount>$500)"
+    reveals: "High-value orders bypassed review"
+    points_toward: "Why did orders skip the review hold?"
+
+  # Hop 4: State machine received incomplete data (HARD)
+  - hop: 4
+    source: "logs"
+    tool: "bash: grep 'order_state_transition' /var/log/order-processor/app.log | grep 'batch-20241128' | head -20"
+    evidence: "'Order ORD-8427: state=received -> approved (auto: hold_for_review=false)'"
+    reveals: "State machine saw hold_for_review=false"
+    points_toward: "The flag was missing from the input data"
+
+  - hop: 4
+    source: "database"
+    tool: "bash: psql -c \"SELECT order_id, raw_payload_size, expected_size FROM order_audit WHERE batch_id='batch-20241128' AND raw_payload_size < expected_size LIMIT 10\""
+    evidence: "347 orders where payload size is smaller than expected"
+    reveals: "Some order payloads are truncated"
+    key_insight: "Trailing fields were lost -- payload is shorter than source"
+
+  # Hop 3: Protobuf silent truncation (VERY HARD)
+  - hop: 3
+    source: "comparison"
+    tool: "bash: diff <(grpcurl -d '{\"batch_id\":\"batch-20241128\",\"order_index\":0}' order-source:50051 GetOrder | protoc --decode=Order) <(psql -c \"SELECT raw_payload FROM order_audit WHERE order_id='ORD-8427'\" | protoc --decode=Order)"
+    evidence: |
+      Source has:  hold_for_review: true, risk_score: 0.87, review_reason: "high_value"
+      Received:    hold_for_review: [missing], risk_score: [missing], review_reason: [missing]
+    reveals: "Trailing protobuf fields are missing in received version"
+    key_insight: "Fields at the end of the message were truncated"
+
+  - hop: 3
+    source: "analysis"
+    tool: "bash: protoc --decode=OrderBatch < /tmp/received_batch.bin | wc -c"
+    evidence: "Received: 4,194,304 bytes (exactly 4MB). Source: 6,847,293 bytes."
+    reveals: "Payload truncated at exactly 4MB boundary"
+    key_insight: "4MB = 4 * 1024 * 1024 -- suspiciously round number"
+
+  # Hop 2: gRPC stream truncation (VERY HARD)
+  - hop: 2
+    source: "network"
+    tool: "bash: tcpdump -i eth0 -c 1000 port 50051 -w /tmp/grpc_capture.pcap && tshark -r /tmp/grpc_capture.pcap -z conv,tcp | head"
+    evidence: "TCP window full at 4MB, server send buffer exhausted"
+    reveals: "TCP send buffer too small for payload"
+
+  - hop: 2
+    source: "grpc"
+    tool: "bash: grep 'grpc.*status' /var/log/order-processor/grpc.log | tail -20"
+    evidence: "All gRPC calls show status=OK"
+    reveals: "gRPC reports success despite truncated payload"
+    significant_silence: true
+
+  # Hop 1: sysctl change (VERY HARD)
+  - hop: 1
+    source: "sysctl"
+    tool: "bash: sysctl net.ipv4.tcp_wmem"
+    evidence: "net.ipv4.tcp_wmem = 4096 87380 4194304"
+    reveals: "Max TCP write buffer is 4MB (was 16MB)"
+
+  - hop: 1
+    source: "git"
+    tool: "bash: git log -p --since='3 weeks ago' -- ansible/roles/kernel-tuning/defaults/main.yml"
+    evidence: |
+      - tcp_wmem_max: 16777216  # 16MB
+      + tcp_wmem_max: 4194304   # 4MB - reduced for memory optimization
+    reveals: "Kernel tuning change 2 weeks ago reduced TCP buffer"
+    root_cause: "Reduced tcp_wmem_max truncates large gRPC payloads"
+
+  - hop: 1
+    source: "change_ticket"
+    tool: "Read docs/changes/INFRA-2847-memory-optimization.md"
+    evidence: |
+      "Reduced TCP buffer sizes to save ~2GB RAM per host.
+       Tested with HTTP API traffic -- no issues observed.
+       Note: gRPC streaming was not tested (low priority)."
+    reveals: "Change was tested against HTTP/1.1 only, not gRPC"
+
+red_herrings:
+  - source: "slack"
+    message: "Maybe the webhook retry logic is broken?"
+    why_wrong: "Retry logic works correctly; the problem is upstream data truncation"
+
+  - source: "metrics"
+    message: "gRPC latency increased slightly last week"
+    why_wrong: "Latency increase is from larger payloads, not the root cause"
+
+  - source: "recent_deploy"
+    message: "We updated the order-processor protobuf schema last week"
+    why_wrong: "Schema update was additive (new fields), not the cause of truncation"
+
+  - source: "sentry"
+    message: "Zero gRPC errors in the last 30 days"
+    why_wrong: "gRPC reports OK for truncated streams -- this IS the problem"
+
+  - source: "partner"
+    message: "ShipCo says their API had issues yesterday"
+    why_wrong: "Partner API issues are unrelated; they correctly processed what we sent"
+
+  - source: "monitoring"
+    message: "CPU and memory normal, no OOM events"
+    why_wrong: "Memory optimization 'succeeded' -- that's what caused the problem"
+
+  - source: "code_review"
+    message: "The idempotency key generation was changed recently"
+    why_wrong: "Idempotency code is working as designed; the bug is that retries generate new keys by design"
+
+shallow_fixes:
+  - fix: "Reset circuit breaker and bring storefront back up"
+    why_fails: "Inventory is still negative; site will error on those SKUs"
+    detection: "Circuit breaker reset without inventory fix"
+
+  - fix: "Fix idempotency keys to not include timestamp"
+    why_fails: "Addresses double-fulfillment but not the data truncation root cause"
+    detection: "Idempotency code changes without investigating truncation"
+
+  - fix: "Add hold_for_review default=true in state machine"
+    why_fails: "Defensive but doesn't fix why the field was missing"
+    detection: "State machine default changes without payload investigation"
+
+  - fix: "Increase gRPC max message size"
+    why_fails: "gRPC already allows large messages; TCP buffer is the bottleneck"
+    detection: "gRPC config changes without sysctl investigation"
+
+  - fix: "Manually correct negative inventory"
+    why_fails: "Will happen again on next large batch unless tcp_wmem is fixed"
+    detection: "Inventory adjustments without investigating cause"
+
+difficulty:
+  estimated_human_time_hours: 9
+  frontier_model_pass_rate_percent: 4
+  hop_count: 8
+  complexity_factors:
+    - "8 hops from symptom to root cause"
+    - "gRPC shows status OK for truncated streams"
+    - "Protobuf silently drops missing optional fields"
+    - "Kernel-level networking issue invisible to app monitoring"
+    - "4MB truncation boundary is the ONLY numeric clue"
+    - "tcp_wmem change was 2 weeks ago, tested 'successfully'"
+    - "Requires understanding TCP window scaling + gRPC + protobuf"
+    - "Three layers of 'significant silence' (kernel, gRPC, protobuf)"
+    - "Cross-domain: kernel -> network -> protocol -> business -> external partner"
+
+failure_modes:
+  common:
+    - mode: "Focus on double-fulfillment only"
+      description: "Fixes idempotency without investigating WHY orders were re-sent"
+      detection: "Webhook/idempotency changes without upstream investigation"
+      hop_reached: 7
+
+    - mode: "Blame protobuf schema change"
+      description: "Assumes recent schema update broke deserialization"
+      detection: "Schema rollback without payload size analysis"
+      hop_reached: 3
+
+    - mode: "Add defaults to state machine"
+      description: "Sets hold_for_review=true as default"
+      detection: "State machine changes without finding truncation cause"
+      hop_reached: 4
+
+  subtle:
+    - mode: "Find truncation but blame gRPC config"
+      description: "Sees 4MB cutoff, assumes gRPC max message limit"
+      detection: "gRPC maxRecvMsgSize changes without sysctl investigation"
+      hop_reached: 2
+
+    - mode: "Find sysctl but wrong conclusion"
+      description: "Sees tcp_wmem change, increases it, but doesn't verify gRPC fixed"
+      detection: "sysctl change without end-to-end verification"
+      hop_reached: 1
+
+    - mode: "Find everything but miss the partner recovery"
+      description: "Fixes root cause but doesn't coordinate with partners on double-shipments"
+      detection: "Technical fix without partner communication"
+      hop_reached: 1
+
+golden_path:
+  steps:
+    - step: 1
+      action: "Triage: understand scope of damage"
+      tools: ["sentry", "prometheus", "partner APIs"]
+      evidence: "847 SKUs negative, 3 partners double-shipped, site offline"
+      time_estimate_minutes: 15
+      hop: 8
+
+    - step: 2
+      action: "Find why inventory went negative"
+      tools: ["webhook logs"]
+      evidence: "Same batch sent twice with different idempotency keys"
+      time_estimate_minutes: 15
+      hop: 7
+
+    - step: 3
+      action: "Find why batch was re-sent"
+      tools: ["order service logs"]
+      evidence: "Incomplete state detected, triggered retry"
+      key_insight: "Original data was incomplete"
+      time_estimate_minutes: 15
+      hop: 5-6
+
+    - step: 4
+      action: "Find what data was incomplete"
+      tools: ["order audit trail", "payload comparison"]
+      evidence: "Trailing protobuf fields missing (hold_for_review, risk_score)"
+      time_estimate_minutes: 20
+      hop: 4
+
+    - step: 5
+      action: "Measure the truncation"
+      tools: ["protoc decode comparison", "payload size analysis"]
+      evidence: "Received payload exactly 4MB, source was 6.8MB"
+      key_insight: "4MB truncation = suspicious round number"
+      time_estimate_minutes: 20
+      hop: 3
+
+    - step: 6
+      action: "Find what limits at 4MB"
+      tools: ["gRPC config check", "tcpdump", "sysctl"]
+      evidence: "gRPC allows 16MB, but tcp_wmem max is 4MB"
+      key_insight: "TCP send buffer is the bottleneck"
+      time_estimate_minutes: 20
+      hop: 2
+
+    - step: 7
+      action: "Find why tcp_wmem was reduced"
+      tools: ["git log on ansible/kernel-tuning", "change ticket"]
+      evidence: "Memory optimization 2 weeks ago, only tested HTTP traffic"
+      time_estimate_minutes: 10
+      hop: 1
+
+    - step: 8
+      action: "Remediate across all dimensions"
+      tools: ["sysctl fix", "inventory correction", "partner coordination"]
+      verification: |
+        Restore tcp_wmem to 16MB. Verify gRPC payloads arrive complete. Correct inventory for double-fulfilled SKUs. Coordinate with partners on returns/credits. Reset circuit breaker, bring storefront online. Fix idempotency keys to not include timestamp. Add payload size validation to order processor.
+      time_estimate_minutes: 60
+
+grading:
+  total_weight: 1.0
+
+  understanding:
+    - criterion: "Connected negative inventory to double-fulfillment"
+      weight: 0.08
+    - criterion: "Found idempotency key problem (timestamp-based)"
+      weight: 0.05
+    - criterion: "Discovered protobuf field truncation"
+      weight: 0.10
+    - criterion: "Identified 4MB truncation boundary"
+      weight: 0.10
+    - criterion: "Connected to TCP send buffer limit"
+      weight: 0.10
+    - criterion: "Found sysctl change as root cause"
+      weight: 0.10
+
+  outcome_based:
+    - criterion: "Restored tcp_wmem to safe value"
+      weight: 0.10
+    - criterion: "Verified gRPC payloads arrive intact"
+      weight: 0.05
+    - criterion: "Corrected inventory counts"
+      weight: 0.05
+    - criterion: "Storefront back online"
+      weight: 0.05
+    - criterion: "Coordinated partner recovery"
+      weight: 0.05
+
+  ancillary:
+    - criterion: "Fixed timestamp-based idempotency keys"
+      weight: 0.05
+    - criterion: "Added payload size validation"
+      weight: 0.03
+
+  communication:
+    - criterion: "Incident report covers full chain including kernel-level root cause"
+      weight: 0.09
+
+hints:
+  progressive:
+    - level: 1
+      trigger_condition: "no_progress_minutes >= 30"
+      content: "Inventory went negative because the same orders were fulfilled twice. Check the webhook dispatch logs -- were the same orders sent more than once?"
+
+    - level: 2
+      trigger_condition: "no_progress_minutes >= 60"
+      content: "The orders were re-sent because the state machine detected incomplete data. Compare what the order source sent vs. what the processor received. Are all fields present?"
+
+    - level: 3
+      trigger_condition: "no_progress_minutes >= 90"
+      content: "The received protobuf payload is exactly 4MB. The source payload is 6.8MB. Something is truncating at 4MB. This is not a gRPC limit. What else limits at 4MB?"
+
+    - level: 4
+      trigger_condition: "no_progress_minutes >= 120"
+      content: "Check sysctl net.ipv4.tcp_wmem. The max TCP write buffer determines maximum in-flight data. If it's smaller than the payload, the stream is truncated."
+
+environment:
+  services:
+    - name: "order-source"
+      language: "go"
+      port: 50051
+      protocol: "gRPC"
+    - name: "order-processor"
+      language: "go"
+      key_files:
+        - "pkg/processor/state_machine.go"
+        - "pkg/webhooks/dispatch.go"
+    - name: "inventory-service"
+      language: "go"
+    - name: "storefront"
+      language: "typescript"
+
+    - name: "linux-host"
+      config:
+        sysctl:
+          net.ipv4.tcp_wmem: "4096 87380 4194304"
+
+related_incidents:
+  - url: "https://blog.cloudflare.com/the-story-of-one-latency-spike/"
+    title: "Cloudflare TCP tuning incident"
+    relevance: "Kernel-level network configuration causing application failures"
+  - url: "https://grpc.io/docs/guides/performance/"
+    title: "gRPC Performance Best Practices"
+    relevance: "gRPC streaming and buffer management"
+
+tags:
+  - "cascading-failure"
+  - "kernel-tuning"
+  - "tcp-buffer"
+  - "grpc-truncation"
+  - "protobuf-silent-drop"
+  - "state-machine"
+  - "double-fulfillment"
+  - "8-hop"
+  - "triple-significant-silence"
+  - "cross-layer"
+  - "partner-impact"

@@ -1,0 +1,494 @@
+id: CASCADE-008
+version: "2.0"
+name: "Log rotation misconfiguration -> WAL disk full -> Postgres checkpoint failure -> silent fsync error -> crash recovery data loss -> application serves stale reads -> phantom records in user accounts"
+category: "Cascading Failures"
+subcategory: "Storage + Data Integrity Chains"
+
+sdlc_phases:
+  primary: "Debugging"
+  secondary: ["Maintenance", "Verification"]
+
+description: |
+  A 9-hop cascading failure originating from a logrotate configuration change.
+  An SRE added a new log rotation rule that inadvertently included the Postgres
+  WAL directory in its rotation glob. WAL segments get rotated/compressed,
+  filling the WAL disk with .gz files that Postgres can't read. Postgres
+  checkpoint process fails silently (logs warning but continues). On a routine
+  restart, crash recovery cannot replay WAL, and Postgres falls back to the
+  last successful checkpoint -- 6 hours old. The application reads stale data:
+  records that were deleted reappear, prices revert to old values, user
+  preferences reset. Customers see "ghost" items in their cart that were
+  removed hours ago, and completed transactions show as pending.
+
+  The agent sees: "Users report deleted items reappearing in their cart and
+  completed orders showing as 'pending'"
+  The root cause is: A logrotate glob that matches WAL files, 9 hops away.
+
+  Critical insight: Postgres is running and healthy. All health checks pass.
+  The data loss is invisible because the database is internally consistent --
+  it's just 6 hours behind. The only way to detect it is to compare DB state
+  against external sources (Stripe, email confirmations, user session logs).
+
+causal_chain:
+  - hop: 1
+    component: "logrotate-config"
+    failure: "/etc/logrotate.d/postgres added glob /var/lib/postgresql/*/log/* but WAL is at /var/lib/postgresql/14/main/pg_wal"
+    boundary_type: "configuration"
+    evidence_difficulty: "very_hard"
+    evidence_location: "logrotate config files"
+    temporal_gap: "Config changed 2 weeks ago"
+
+  - hop: 2
+    component: "wal-directory"
+    failure: "WAL segments compressed to .gz by logrotate, Postgres can't read them"
+    boundary_type: "storage"
+    evidence_difficulty: "very_hard"
+    evidence_location: "filesystem"
+
+  - hop: 3
+    component: "postgres-checkpointer"
+    failure: "Checkpoint process cannot fsync WAL, logs WARNING but continues operating"
+    boundary_type: "database"
+    evidence_difficulty: "hard"
+    evidence_location: "postgres_logs"
+    significant_silence: true  # WARNING not ERROR, easily missed
+
+  - hop: 4
+    component: "postgres"
+    failure: "Routine restart triggers crash recovery, WAL replay fails"
+    boundary_type: "database"
+    evidence_difficulty: "hard"
+    evidence_location: "postgres_recovery_logs"
+
+  - hop: 5
+    component: "postgres"
+    failure: "Falls back to last good checkpoint from 6 hours before restart"
+    boundary_type: "database"
+    evidence_difficulty: "hard"
+    evidence_location: "pg_control"
+    insight: "Database is now 6 hours behind but internally consistent"
+
+  - hop: 6
+    component: "application"
+    failure: "Reads data from 6 hours ago: deleted items exist, prices are old"
+    boundary_type: "service"
+    evidence_difficulty: "medium"
+    evidence_location: "application_logs"
+    significant_silence: true  # No application errors -- data just looks stale
+
+  - hop: 7
+    component: "user-facing"
+    failure: "Cart shows deleted items, completed orders show 'pending'"
+    boundary_type: "user_facing"
+    evidence_difficulty: "easy"
+    evidence_location: "support_tickets"
+
+  - hop: 8
+    component: "payment-state"
+    failure: "Stripe shows completed charges, DB shows 'pending' -- state mismatch"
+    boundary_type: "business_logic"
+    evidence_difficulty: "easy"
+    evidence_location: "reconciliation_report"
+
+  - hop: 9
+    component: "automated-systems"
+    failure: "Payment reconciliation job retries 'pending' payments, causing double charges"
+    boundary_type: "business_logic"
+    evidence_difficulty: "easy"
+    evidence_location: "stripe_api_logs"
+
+task_prompt: |
+  Something very strange is happening. Multiple issues reported simultaneously:
+
+  1. Users say items they removed from their cart have "come back"
+  2. Orders that customers completed hours ago now show as "pending"
+  3. Some users say their account preferences (shipping address, payment
+     method) reverted to old values
+  4. We're seeing duplicate payment attempts for orders marked "completed"
+     in customer emails but "pending" in our system
+
+  The on-call engineer restarted the main database 8 hours ago as part of
+  routine maintenance (applying a minor Postgres patch). Everything looked
+  normal after restart.
+
+  "It's like the database went back in time."
+
+  Investigate what happened and prevent further damage.
+
+requirements:
+  languages: ["python", "go", "typescript"]
+  patterns:
+    - "postgresql"
+    - "wal_management"
+    - "crash_recovery"
+    - "logrotate"
+    - "checkpoint"
+  infrastructure:
+    - "postgres"
+    - "linux"
+  min_services: 3
+
+evidence_map:
+  # Hop 9: Double charges (EASY - urgent symptom)
+  - hop: 9
+    source: "stripe"
+    tool: "bash: stripe charges list --limit 50 --created[gte]=today"
+    evidence: "12 duplicate charges for orders already marked 'completed' in email"
+    reveals: "System is retrying charges for already-paid orders"
+    points_toward: "Why does our system think completed orders are pending?"
+
+  # Hop 8: State mismatch (EASY)
+  - hop: 8
+    source: "reconciliation"
+    tool: "bash: python scripts/reconcile_payments.py --dry-run"
+    evidence: "847 orders: Stripe='succeeded', DB='pending'"
+    reveals: "DB state disagrees with Stripe for recent orders"
+    key_insight: "DB is behind -- orders completed after some cutoff are 'pending'"
+
+  # Hop 7: User-visible effects (EASY)
+  - hop: 7
+    source: "support"
+    tool: "slack_get_messages('#support')"
+    evidence: "'My cart has items I deleted yesterday', 'My order says pending but I got the confirmation email'"
+    reveals: "Users are seeing stale data from hours ago"
+
+  # Hop 6: Application data is stale (MEDIUM)
+  - hop: 6
+    source: "database"
+    tool: "bash: psql -c \"SELECT MAX(updated_at) FROM orders\""
+    evidence: "Max updated_at is 6 hours before the restart"
+    reveals: "No data modifications recorded after a specific timestamp"
+    key_insight: "Database appears to have lost 6 hours of writes"
+
+  - hop: 6
+    source: "application"
+    tool: "bash: grep 'INSERT\\|UPDATE\\|DELETE' /var/log/app/queries.log | tail -50"
+    evidence: "All post-restart writes are working (new data is fine)"
+    reveals: "Current writes work -- only historical data is missing"
+    red_herring: "Might think 'writes are fine now, it was a transient issue'"
+
+  # Hop 5: Checkpoint recovery (HARD)
+  - hop: 5
+    source: "pg_control"
+    tool: "bash: pg_controldata /var/lib/postgresql/14/main | grep -i checkpoint"
+    evidence: |
+      Latest checkpoint location: 0/4A000028
+      Latest checkpoint's TimeLineID: 1
+      Time of latest checkpoint: 2024-11-28 02:15:00 (6 hours before restart)
+    reveals: "Database recovered to checkpoint from 6 hours before restart"
+    key_insight: "WAL replay failed -- fell back to last good checkpoint"
+
+  # Hop 4: WAL replay failure (HARD)
+  - hop: 4
+    source: "postgres_logs"
+    tool: "bash: grep -A5 'recovery' /var/log/postgresql/postgresql-14-main.log | grep -i 'wal\\|recovery\\|checkpoint'"
+    evidence: |
+      FATAL: could not open file "pg_wal/000000010000000000000048": No such file or directory
+      LOG: invalid WAL segment, falling back to last valid checkpoint
+      LOG: database system was not properly shut down; automatic recovery complete
+    reveals: "WAL files were missing during recovery"
+    points_toward: "Where did the WAL files go?"
+
+  # Hop 3: Checkpoint fsync warnings (HARD - significant silence)
+  - hop: 3
+    source: "postgres_logs"
+    tool: "bash: grep -i 'warning\\|checkpoint' /var/log/postgresql/postgresql-14-main.log.1 | head -50"
+    evidence: |
+      WARNING: could not fsync file "pg_wal/000000010000000000000045.gz": Invalid argument
+      WARNING: checkpoints are occurring too frequently (6 second intervals)
+      LOG: checkpoint starting: time
+      LOG: checkpoint complete: wrote 0 buffers (0.0%)
+    reveals: "Checkpoint was warning about .gz files but continuing"
+    key_insight: "Postgres warned but didn't fail -- .gz files are NOT valid WAL"
+
+  # Hop 2: WAL files compressed (VERY HARD)
+  - hop: 2
+    source: "filesystem"
+    tool: "bash: ls -la /var/lib/postgresql/14/main/pg_wal/"
+    evidence: |
+      -rw------- 1 postgres postgres  2.1M 000000010000000000000045.gz
+      -rw------- 1 postgres postgres  2.3M 000000010000000000000046.gz
+      -rw------- 1 postgres postgres  16M  000000010000000000000049
+      -rw------- 1 postgres postgres  16M  00000001000000000000004A
+    reveals: "Old WAL segments are .gz compressed -- should be raw 16MB files"
+    key_insight: "Something is compressing WAL files on disk"
+
+  - hop: 2
+    source: "filesystem"
+    tool: "bash: stat /var/lib/postgresql/14/main/pg_wal/000000010000000000000045.gz"
+    evidence: "Modified by uid 0 (root), not uid 109 (postgres)"
+    reveals: "Root process modified these files -- not Postgres itself"
+
+  # Hop 1: Logrotate config (VERY HARD)
+  - hop: 1
+    source: "logrotate"
+    tool: "bash: cat /etc/logrotate.d/postgresql"
+    evidence: |
+      /var/lib/postgresql/*/log/* {
+          daily
+          rotate 7
+          compress
+          missingok
+      }
+      # Added 2024-11-14: rotate all postgres logs
+      /var/lib/postgresql/*/*.log
+      /var/lib/postgresql/14/main/* {
+          weekly
+          rotate 4
+          compress
+          missingok
+          notifempty
+      }
+    reveals: "Second block matches pg_wal/* -- WAL files get compressed by logrotate"
+    root_cause: "Overly broad glob in logrotate config captures WAL directory"
+
+  - hop: 1
+    source: "git"
+    tool: "bash: git log -p --since='3 weeks ago' -- /etc/logrotate.d/postgresql"
+    evidence: "Commit: 'chore: consolidate postgres log rotation rules'"
+    reveals: "Config change 2 weeks ago added the overly broad glob"
+
+red_herrings:
+  - source: "slack"
+    message: "The maintenance restart must have corrupted something"
+    why_wrong: "Restart was clean; the problem is missing WAL, not the restart itself"
+
+  - source: "recent_changes"
+    message: "We upgraded Postgres from 14.9 to 14.10 last week"
+    why_wrong: "Minor version upgrade was fine; WAL issue predates it"
+
+  - source: "metrics"
+    message: "Disk I/O was high during restart"
+    why_wrong: "High I/O was from recovery attempting to replay WAL"
+
+  - source: "application"
+    message: "Maybe the ORM has a caching bug?"
+    why_wrong: "ORM reads directly from DB; the DB data itself is stale"
+
+  - source: "sentry"
+    message: "We see no errors from the application layer"
+    why_wrong: "Application has no way to know data is stale -- it IS internally consistent"
+
+  - source: "monitoring"
+    message: "All Postgres health checks pass"
+    why_wrong: "DB is healthy and consistent; it's just 6 hours behind reality"
+
+shallow_fixes:
+  - fix: "Re-run payment reconciliation with correct data"
+    why_fails: "Data is gone; can't reconcile without recovering WAL"
+    detection: "Reconciliation script runs without data recovery"
+
+  - fix: "Restore from last night's backup"
+    why_fails: "Backup may also be pre-corruption; doesn't fix logrotate"
+    detection: "pg_restore without checking logrotate config"
+
+  - fix: "Increase checkpoint frequency"
+    why_fails: "Checkpoints still can't fsync to compressed WAL files"
+    detection: "checkpoint_timeout changes without WAL investigation"
+
+  - fix: "Turn off logrotate entirely"
+    why_fails: "Stops the compression but doesn't recover lost data"
+    detection: "logrotate config removal without WAL recovery"
+
+  - fix: "Manually recreate the missing 6 hours from Stripe data"
+    why_fails: "Partial recovery; Stripe only has payment data, not cart/preferences"
+    detection: "Stripe import without full data recovery strategy"
+
+difficulty:
+  estimated_human_time_hours: 9
+  frontier_model_pass_rate_percent: 5
+  hop_count: 9
+  complexity_factors:
+    - "9 hops from symptom to root cause"
+    - "Database is healthy and internally consistent"
+    - "All health checks pass"
+    - "Root cause is a configuration change from 2 weeks ago"
+    - "Postgres warnings were in old log files (rotated!)"
+    - "WAL compression is extremely unusual -- not a known failure mode"
+    - "The logrotate config looks reasonable at first glance"
+    - "Requires deep Postgres internals knowledge (WAL, checkpoints, fsync)"
+    - "'Time travel' symptoms are disorienting and hard to reason about"
+    - "Ironic: the tool that broke things (logrotate) also rotated the evidence (warnings)"
+
+failure_modes:
+  common:
+    - mode: "Blame the restart"
+      description: "Assumes the maintenance restart corrupted data"
+      detection: "Investigation focuses on restart procedure"
+      hop_reached: 7
+
+    - mode: "Blame the Postgres upgrade"
+      description: "Assumes minor version upgrade caused data loss"
+      detection: "Rollback investigation or Postgres version comparison"
+      hop_reached: 7
+
+    - mode: "Assume transient issue"
+      description: "Thinks data loss was one-time, focuses on recovery only"
+      detection: "Data recovery without investigating cause"
+      hop_reached: 6
+
+  subtle:
+    - mode: "Find WAL missing but blame disk failure"
+      description: "Discovers missing WAL files, assumes disk error"
+      detection: "Disk diagnostics without checking file modification"
+      hop_reached: 4
+
+    - mode: "Find .gz files but assume manual archiving"
+      description: "Sees compressed WAL, thinks it was intentional archiving"
+      detection: "Doesn't check who/what compressed the files"
+      hop_reached: 2
+
+    - mode: "Find logrotate but only fix the glob"
+      description: "Fixes logrotate config but doesn't recover data"
+      detection: "Config fix without data recovery"
+      hop_reached: 1
+
+golden_path:
+  overview: |
+    A senior engineer recognizes the "time travel" symptoms as a database
+    recovery to a stale checkpoint. They trace backward through WAL replay
+    failure, missing WAL files, compressed .gz files in pg_wal, and finally
+    to a logrotate config change that accidentally targeted the WAL directory.
+    The ironic twist: logrotate also rotated the Postgres log files that
+    contained the checkpoint warnings, making the evidence harder to find.
+
+  steps:
+    - step: 1
+      action: "Recognize 'time travel' pattern"
+      tools: ["psql MAX(updated_at)", "compare Stripe vs DB"]
+      evidence: "DB is 6 hours behind external truth"
+      key_insight: "This is a data recovery issue, not a bug"
+      time_estimate_minutes: 20
+      hop: 6-9
+
+    - step: 2
+      action: "Check Postgres recovery logs"
+      tools: ["grep postgres logs for recovery"]
+      evidence: "WAL replay failed, fell back to old checkpoint"
+      time_estimate_minutes: 15
+      hop: 4-5
+
+    - step: 3
+      action: "Investigate missing WAL files"
+      tools: ["ls pg_wal directory"]
+      evidence: ".gz files where 16MB WAL segments should be"
+      key_insight: "Someone compressed the WAL files"
+      time_estimate_minutes: 15
+      hop: 2
+
+    - step: 4
+      action: "Find what compressed them"
+      tools: ["stat files", "check cron/logrotate"]
+      evidence: "Files modified by root, logrotate glob matches pg_wal"
+      time_estimate_minutes: 15
+      hop: 1
+
+    - step: 5
+      action: "Check old checkpoint warnings"
+      tools: ["grep rotated log files for checkpoint warnings"]
+      evidence: "fsync warnings in .log.1 files dating back 2 weeks"
+      key_insight: "Irony: logrotate rotated the evidence too"
+      time_estimate_minutes: 10
+      hop: 3
+
+    - step: 6
+      action: "Remediate: fix logrotate, recover data, verify"
+      tools: [
+        "Fix logrotate glob to exclude pg_wal",
+        "Decompress .gz WAL files if recoverable",
+        "Restore from backup + replay recovered WAL",
+        "Reconcile with Stripe for payment data",
+        "Stop payment reconciliation job to prevent more double charges"
+      ]
+      time_estimate_minutes: 60
+
+grading:
+  total_weight: 1.0
+
+  understanding:
+    - criterion: "Recognized stale checkpoint recovery"
+      weight: 0.10
+    - criterion: "Found missing/compressed WAL files"
+      weight: 0.10
+    - criterion: "Identified logrotate as the compressor"
+      weight: 0.10
+    - criterion: "Found the specific glob that matched pg_wal"
+      weight: 0.10
+    - criterion: "Connected to the config change from 2 weeks ago"
+      weight: 0.10
+
+  outcome_based:
+    - criterion: "Fixed logrotate configuration"
+      weight: 0.10
+    - criterion: "Recovered or restored lost data"
+      weight: 0.10
+    - criterion: "Stopped double-charge reconciliation job"
+      weight: 0.05
+    - criterion: "Verified WAL archiving is working post-fix"
+      weight: 0.05
+
+  ancillary:
+    - criterion: "Refunded double-charged customers"
+      weight: 0.05
+
+  communication:
+    - criterion: "Incident report covers full chain"
+      weight: 0.10
+      criteria:
+        - "Explains WAL + checkpoint + logrotate interaction"
+        - "Recommends monitoring for WAL archiving failures"
+        - "Recommends excluding data directories from logrotate"
+
+  collateral:
+    - criterion: "Didn't make data loss worse"
+      weight: 0.05
+
+hints:
+  progressive:
+    - level: 1
+      trigger_condition: "no_progress_minutes >= 30"
+      content: "The phrase 'time travel' is apt. Check when the last data modification happened. Compare with the restart time."
+
+    - level: 2
+      trigger_condition: "no_progress_minutes >= 60"
+      content: "Check pg_controldata to see what checkpoint Postgres recovered to. How old is it?"
+
+    - level: 3
+      trigger_condition: "no_progress_minutes >= 90"
+      content: "WAL files are supposed to be 16MB raw files. Look at what's actually in the pg_wal directory."
+
+    - level: 4
+      trigger_condition: "no_progress_minutes >= 120"
+      content: "Something running as root compressed those WAL files. What runs as root and compresses files? Check /etc/logrotate.d/"
+
+environment:
+  services:
+    - name: "application"
+      language: "python"
+    - name: "postgres"
+      version: "14.10"
+      config:
+        wal_level: "replica"
+        checkpoint_timeout: "5min"
+    - name: "logrotate"
+      config_dir: "/etc/logrotate.d/"
+
+related_incidents:
+  - url: "https://about.gitlab.com/blog/2017/02/10/postmortem-of-database-outage-of-january-31/"
+    title: "GitLab database deletion incident 2017"
+    relevance: "Data loss from operational error with database infrastructure"
+  - url: "https://www.postgresql.org/docs/14/wal-configuration.html"
+    title: "PostgreSQL WAL Configuration"
+    relevance: "WAL management and checkpoint behavior"
+
+tags:
+  - "cascading-failure"
+  - "logrotate"
+  - "postgresql-wal"
+  - "data-loss"
+  - "checkpoint-recovery"
+  - "time-travel"
+  - "9-hop"
+  - "significant-silence"
+  - "ironic-evidence-destruction"
+  - "configuration-drift"

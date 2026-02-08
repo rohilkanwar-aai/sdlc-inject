@@ -1,0 +1,2368 @@
+# CASCADE-012 Evidence Map (30-hop, 5-branch, noise-enabled)
+# Target: <10% pass rate on Opus with 50K+ noise entries per source
+#
+# Cognitive bias exploitation:
+# - ANCHORING: First signals all point at checkout (Branch A) -- loudest errors
+# - CONFIRMATION BIAS: Shipping latency 29s confirms "shipping is broken" (wrong)
+# - EXPERT AUTHORITY: Priya dismisses Kafka config as "just latency tuning"
+# - FALSE TEMPORAL CORRELATION: Go dependency bump 3 days ago, shipping config yesterday
+# - MONITORING BLINDNESS: Agent's own investigation tools are degraded (Branch C)
+# - INFORMATION OVERLOAD: 5 teams reporting, Tyler investigating 15+ wrong theories
+# - SATISFICING: Restarting pods "fixes" things for 5 minutes (failed recovery trap)
+
+id: CASCADE-012-otel
+name: "Kafka rebalance storm -> 5-branch cascade"
+codebase: "opentelemetry-demo"
+
+task_prompt: |
+  CRITICAL MULTI-TEAM INCIDENT
+
+  Multiple teams are reporting simultaneous issues that started 2-3 hours ago:
+
+  1. [CHECKOUT TEAM] Checkout success rate dropped to ~40%. Some customers
+     report being charged but order shows "failed." Multiple fraud auto-
+     suspensions from duplicate charges.
+
+  2. [FINANCE TEAM] Revenue dashboard shows $0 for the last 3 hours.
+     CFO asks "did all revenue stop?"
+
+  3. [PLATFORM TEAM] Dashboards show stale or missing data. Alert system
+     seems to have stopped firing. "Our monitoring might be broken."
+
+  4. [STOREFRONT TEAM] Customers report carts randomly becoming empty.
+     Cart pods were restarted 15 minutes ago -- issue returned immediately.
+
+  5. [PRODUCT TEAM] Recommendations showing discontinued products. Some
+     ad slots rendering blank on product pages.
+
+  No code deployments today. All services report healthy on health checks.
+
+  Investigate, correlate these symptoms, find the root cause, and resolve.
+
+# ===========================================================================
+# NOISE CONFIGURATION
+# ===========================================================================
+noise_config:
+  entries_per_source: 50000
+  seed: 2024
+  time_range_hours: 168
+  signal_positions:
+    # Slack: signals buried deep in each channel's noise
+    incidents: [47, 89, 127, 183, 247, 312, 389, 428, 502, 567, 634, 712, 789, 856, 923, 1047, 1123, 1289, 1456, 1623, 1789, 1956, 2123, 2347, 2567, 2789, 3012, 3234, 3456, 3789]
+    platform-general: [8847, 8849, 8851, 12493, 15847]
+    sre-ops: [2847, 4293, 6847]
+    data-eng: [1847, 3293]
+    support: [347, 847, 1847]
+    backend-eng: [5847, 7293, 9847]
+    frontend-eng: [4123, 7891, 11234, 18456]
+    platform: [3456, 6789, 14567]
+    ml-team: [5234, 9876, 16789]
+    general: [1234, 8765, 21345]
+    random: [2345, 11234, 19876]
+    standups: [678, 1345, 2012, 2679, 3346, 4013, 4680]
+    pr-reviews: [3789, 7654, 12345, 18901]
+    deploys: [2567, 5678, 9012, 15678]
+    alerts: [1456, 3890, 6234, 8567, 11890, 14234, 17567]
+    security: [4567, 9234, 15890]
+    oncall: [2890, 6123, 13456]
+    postmortems: [7890, 16234]
+    product: [3123, 8456, 14789]
+    design: [5890, 12123]
+    leadership: [6456, 13789]
+    social: [4890, 11123, 17456]
+    help-infra: [2123, 7456, 13890, 19123]
+    help-data: [3567, 8901, 15234]
+    til: [1890, 6234, 12567, 18890]
+    # Logs: signals at specific positions within 50K entries
+    checkout-service: [42847, 42849, 42851, 42853, 42855, 43293, 44847]
+    accounting-service: [38293, 39847]
+    otel-collector: [35847, 36293]
+    cart-service: [31847, 32293]
+    recommendation-service: [28847, 29293]
+
+# ===========================================================================
+# SLACK MCP SERVER
+# ===========================================================================
+slack:
+  channels:
+    - name: "#incidents"
+      messages:
+        # DISTRACTOR: Pre-existing issues mentioned before the main incident
+        - user: "dan (backend eng)"
+          timestamp: "2024-12-02T08:45:00Z"
+          text: "Heads up everyone -- the payment service connection pool has been leaking for about a week. Currently at 7/10 connections. I filed INFRA-3012. Not urgent yet but we should fix it before it becomes critical."
+
+        - user: "priya (platform eng)"
+          timestamp: "2024-12-02T08:50:00Z"
+          text: "Also FYI -- I've been seeing timestamp ordering violations in the order audit trail. The preserve-service clock is 3 seconds behind. Filed a ticket to investigate. Probably related to that CLOCK_OFFSET_MS env var someone added."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-12-02T09:10:00Z"
+          text: "Just noticed seat contention warnings in ts-seat-service logs -- 47 occurrences this week! We might be double-assigning seats. Could this be why notifications are breaking? If the queue gets flooded with duplicate booking notifications..."
+
+        # These messages get injected at signal_positions within 50K noise entries
+        - user: "alicia (SRE on-call)"
+          timestamp: "2024-12-02T09:17:00Z"
+          text: "Getting paged on checkout. P99 at 30s. Multiple teams reporting issues. Setting up incident bridge."
+
+        - user: "dan (backend eng)"
+          timestamp: "2024-12-02T09:19:00Z"
+          text: "Checkout team here. Success rate at 40%. Shipping quotes timing out. Some orders charged but showing failed."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-12-02T09:20:00Z"
+          text: "Whoa this is bad. Let me check if it's DNS again. Last time we had multi-service issues it was DNS."
+
+        - user: "eve-data (data eng)"
+          timestamp: "2024-12-02T09:21:00Z"
+          text: "Finance team here. Our revenue dashboard shows $0 for the last 3 hours. Is the accounting pipeline broken?"
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-12-02T09:22:00Z"
+          text: "DNS is fine. Resolving in <1ms. Maybe TLS certs? We have rotation next week."
+
+        - user: "dave-fe (frontend eng)"
+          timestamp: "2024-12-02T09:23:00Z"
+          text: "Storefront team: customers reporting empty carts. We restarted cart pods 15 min ago but the issue came back."
+
+        - user: "hank-ml (ML eng)"
+          timestamp: "2024-12-02T09:24:00Z"
+          text: "Recommendation team: our model seems to be serving stale recommendations. Showing products that were discontinued 2 days ago."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-12-02T09:25:00Z"
+          text: "TLS certs all valid. Not certs. Could this be a Kubernetes issue? Maybe the cluster is having scheduling problems?"
+
+        - user: "alicia (SRE on-call)"
+          timestamp: "2024-12-02T09:27:00Z"
+          text: "K8s looks healthy. All pods running, no evictions, no OOM kills. This isn't a cluster problem."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-12-02T09:28:00Z"
+          text: "Weird. I'm looking at the Grafana dashboards and some panels show 'No data'. Is Prometheus down?"
+
+        - user: "frank-devops (platform eng)"
+          timestamp: "2024-12-02T09:30:00Z"
+          text: "Actually Tyler might be onto something. I'm seeing stale metrics in Prometheus. Last data point for some series is from 2 hours ago. Our monitoring might be degraded."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-12-02T09:31:00Z"
+          text: "OH. If monitoring is broken too, that's a FOURTH issue. What could take down checkout AND monitoring AND accounting AND carts at the same time?"
+
+        - user: "alicia (SRE on-call)"
+          timestamp: "2024-12-02T09:33:00Z"
+          text: "Let's not jump to conclusions. These could be separate issues that coincidentally started at the same time. Has anyone checked if there were any config changes today?"
+
+        - user: "priya (platform eng)"
+          timestamp: "2024-12-02T09:35:00Z"
+          text: "No config changes today. No deploys. The only recent change was Kevin's Kafka consumer tuning from last Wednesday but that was just a latency optimization, nothing risky."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-12-02T09:36:00Z"
+          text: "Kafka! What if Kafka is down? All these services use Kafka. Checkout produces to it, accounting consumes from it, and I think the OTel Collector exports to it too."
+
+        - user: "priya (platform eng)"
+          timestamp: "2024-12-02T09:38:00Z"
+          text: "Kafka brokers are all up. I can see the cluster in the Kafka UI. Broker CPU is normal. This isn't a Kafka outage."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-12-02T09:39:00Z"
+          text: "But brokers being 'up' doesn't mean everything's fine. What about consumer lag? What about partition leaders?"
+
+        - user: "dan (backend eng)"
+          timestamp: "2024-12-02T09:40:00Z"
+          text: "I'm looking at checkout logs. Same as last time - context deadline exceeded on HTTP calls to shipping. Goroutine count is at 847 which is way too high. Something is blocking goroutines."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-12-02T09:42:00Z"
+          text: "847 goroutines! That's the Kafka producer. I bet the sendToPostProcessor select is blocking because Kafka can't ack messages fast enough. Let me look at the code."
+
+        - user: "alicia (SRE on-call)"
+          timestamp: "2024-12-02T09:43:00Z"
+          text: "Tyler please stop guessing and start verifying. Dan, can you check what the goroutines are actually blocked on? A goroutine dump would help."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-12-02T09:45:00Z"
+          text: "Wait - I just checked the Go dependency bump from 3 days ago (PR #1248 bumping golang.org/x/net). What if that introduced a regression in the HTTP transport? There were known issues with connection reuse."
+
+        - user: "dan (backend eng)"
+          timestamp: "2024-12-02T09:47:00Z"
+          text: "The x/net bump was 0.46->0.47, a patch version. I reviewed it. No transport changes. Not the dependency."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-12-02T09:49:00Z"
+          text: "OK then maybe it's the shipping service. Priya changed the Actix worker thread count yesterday. What if that caused connection exhaustion on the shipping side?"
+
+        - user: "priya (platform eng)"
+          timestamp: "2024-12-02T09:50:00Z"
+          text: "I increased shipping workers from 4 to 8. More workers = more throughput. It can't cause connection problems on the checkout side. And shipping's own metrics show 120ms P99."
+
+        - user: "eve-data (data eng)"
+          timestamp: "2024-12-02T09:52:00Z"
+          text: "Can we focus on the revenue dashboard for a moment? I queried the accounting DB directly and there are zero order records for the last 3 hours. This isn't a dashboard bug - the data is actually missing."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-12-02T09:54:00Z"
+          text: "Zero records?! That's the accounting consumer. If it can't consume from Kafka, no records get written. @priya you said Kafka is fine but IS the accounting consumer group actually healthy?"
+
+        - user: "frank-devops (platform eng)"
+          timestamp: "2024-12-02T09:56:00Z"
+          text: "I'm having trouble checking consumer group status. The Kafka management tools are showing intermittent timeouts. Let me try from a different broker."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-12-02T09:58:00Z"
+          text: "Intermittent timeouts on Kafka management! That sounds like Kafka IS having problems, just not showing as 'down'. Maybe it's the rebalancing? When consumers rebalance they all pause."
+
+        - user: "alicia (SRE on-call)"
+          timestamp: "2024-12-02T10:00:00Z"
+          text: "OK let's take stock. We have: (1) checkout goroutine buildup (2) accounting data gap (3) stale monitoring (4) empty carts (5) bad recommendations. ALL of these could trace back to Kafka if the consumer groups are unstable. Frank, can you get the consumer group state?"
+
+        - user: "frank-devops (platform eng)"
+          timestamp: "2024-12-02T10:03:00Z"
+          text: "Got it. The accounting-service consumer group is in state 'PreparingRebalance'. It's been rebalacning continuously. Group generation: 847. Normal is maybe 5-10 over a week. This is a rebalacne storm."
+          # NOTE: Frank types "rebalacne" not "rebalance" -- a common typo.
+          # Agent searching for "rebalance" will NOT find this message.
+          # Agent must also search for "rebalacne" or use fuzzy search.
+
+        - user: "alicia (SRE on-call)"
+          timestamp: "2024-12-02T10:05:00Z"
+          text: "I tried to pull up the Kafka consumer dashboard but the Grafana link in the runbook is dead. Anyone have the new URL? Old link: https://grafana.internal/d/kafka-consumers-v2 returns 404."
+          # OUTDATED RUNBOOK: dashboard was moved during a Grafana migration last month.
+          # No one updated the runbook. Agent can't use this shortcut.
+
+        - user: "frank-devops (platform eng)"
+          timestamp: "2024-12-02T10:06:00Z"
+          text: "The new grafana is at /d/kafka-overview but it only shows broker-level metrics, not consumer group detail. We lost the consumer-specific dashboard in the migration and nobody rebuilt it."
+          # MISSING DASHBOARD: the consumer group dashboard doesn't exist anymore.
+          # Agent must get this info from kafka CLI or ask coworkers.
+
+        - user: "kevin-sre"
+          timestamp: "2024-12-02T10:08:00Z"
+          text: "hey just saw the incident. the kafak config change was suposed to be fine - i tested it last wedsneday and latency was great. whats happening?"
+          # TYPOS: "kafak", "suposed", "wedsneday" -- realistic rushed typing during incident.
+          # Also: Kevin tested under NORMAL load, not 2x Monday load.
+
+        - user: "priya (platform eng)"
+          timestamp: "2024-12-02T10:10:00Z"
+          text: "Kevin -- what were the exact values you changed? I don't see the actual config values in the docker-compose diff, just environment variable references like KAFKA_SESSION_TIMEOUT_MS=${KAFKA_SESSION_TIMEOUT_MS:-30000}. Where are the actual values set?"
+          # MISSING CONFIG: the docker-compose.yml uses env var substitution.
+          # The actual values are in a .env file that's NOT in git (it's in .gitignore).
+          # Agent can't just read the file to find the config.
+
+        - user: "kevin-sre"
+          timestamp: "2024-12-02T10:12:00Z"
+          text: "oh yeah the actual values are in the .env file on the deployment server. i dont think thats in git. let me check my terminal history... session.timeout.ms=6000 heartbeat.interval.ms=2000 max.poll.records=500"
+          # Kevin has to dig through terminal history because the config isn't tracked properly.
+          # The .env file is on the deployment server, not in version control.
+
+    - name: "#platform-general"
+      messages:
+        # Buried among noise. James = Kevin (SRE) in this pattern.
+        - user: "bot: ci-notify"
+          timestamp: "2024-11-27T14:22:00Z"
+          text: "Build passed: product-catalog-service #847 (main)"
+
+        - user: "bot: deploy-notify"
+          timestamp: "2024-11-27T16:42:00Z"
+          text: "Deploy complete: shipping-service v2.3.4 -> v2.3.5 (worker thread increase)"
+
+        - user: "kevin-sre"
+          timestamp: "2024-11-27T10:15:00Z"
+          text: "merged the kafka consumer latency tuning, should see lower p99 on accounting message processing"
+
+        - user: "bot: flagd"
+          timestamp: "2024-11-28T07:13:00Z"
+          text: "Flag change: q4-provider-migration defaultVariant changed from legacy to current"
+
+        - user: "priya (platform eng)"
+          timestamp: "2024-12-01T08:15:00Z"
+          text: "Reminder: quarterly cert rotation next week. Nothing today."
+
+    - name: "#sre-ops"
+      messages:
+        - user: "kevin-sre"
+          timestamp: "2024-11-27T10:00:00Z"
+          text: "Deploying Kafka consumer tuning to prod. session.timeout.ms 30s->6s, heartbeat 10s->2s, max.poll.records 100->500. Should improve p99 latency for accounting message processing."
+
+        - user: "kevin-sre"
+          timestamp: "2024-11-27T10:20:00Z"
+          text: "Tuning deployed. Accounting consumer p99 dropped from 200ms to 45ms. Looking good."
+
+        - user: "frank-devops (platform eng)"
+          timestamp: "2024-11-27T11:00:00Z"
+          text: "Nice improvement. Did you load test it?"
+
+    - name: "#data-eng"
+      messages:
+        - user: "eve-data (data eng)"
+          timestamp: "2024-12-02T09:15:00Z"
+          text: "Revenue dashboard for this morning showing some weird numbers. Let me investigate before raising alarm."
+
+        - user: "eve-data (data eng)"
+          timestamp: "2024-12-02T09:50:00Z"
+          text: "Confirmed: zero order records in accounting DB for the last 3 hours. This is NOT a dashboard bug. Data is actually missing from the source table."
+
+    - name: "#support"
+      messages:
+        - user: "lisa (support)"
+          timestamp: "2024-12-02T09:20:00Z"
+          text: "Multiple checkout complaints coming in. 'Page just spins.' A few customers say they were charged but got an error."
+
+        - user: "lisa (support)"
+          timestamp: "2024-12-02T09:40:00Z"
+          text: "Now also getting reports of empty carts. Customers say items disappeared."
+
+        - user: "lisa (support)"
+          timestamp: "2024-12-02T10:00:00Z"
+          text: "58 tickets and counting. Checkout failures, empty carts, wrong product recommendations, and one customer charged twice."
+
+    - name: "#backend-eng"
+      messages:
+        - user: "dan (backend eng)"
+          timestamp: "2024-11-29T15:30:00Z"
+          text: "Merged the golang.org/x/net version bump. Patch release, backwards compatible."
+
+        - user: "priya (platform eng)"
+          timestamp: "2024-12-01T16:30:00Z"
+          text: "Updated shipping service Actix worker threads from 4 to 8 for capacity plan."
+
+        - user: "dan (backend eng)"
+          timestamp: "2024-12-01T16:35:00Z"
+          text: "Should be fine. More workers = more throughput."
+
+    - name: "#frontend-eng"
+      messages:
+        - user: "dave-fe (frontend eng)"
+          timestamp: "2024-12-01T14:30:00Z"
+          text: "Finished migrating the product detail page to Next.js App Router. SSR is way faster now, TTFB dropped from 800ms to 200ms."
+        - user: "rachel-design"
+          timestamp: "2024-12-01T14:45:00Z"
+          text: "Nice! The new layout looks great. Can you make sure the ad slots still render correctly? I noticed some CLS issues on the staging build."
+        - user: "dave-fe (frontend eng)"
+          timestamp: "2024-12-01T15:10:00Z"
+          text: "Good catch, fixing. The ad component has a hardcoded height now so it shouldn't shift."
+        - user: "tom-mobile"
+          timestamp: "2024-12-02T09:35:00Z"
+          text: "Hey is anyone else seeing blank product images on the storefront? Mobile app is also showing missing thumbnails. Not sure if it's a CDN thing or backend."
+          # TANGENTIAL: Tom notices symptoms but attributes to CDN, not the real cause
+
+    - name: "#platform"
+      messages:
+        - user: "frank-devops (platform eng)"
+          timestamp: "2024-11-28T11:00:00Z"
+          text: "Finished the Grafana migration to v11. All dashboards moved. Let me know if you find any broken links."
+        - user: "priya (platform eng)"
+          timestamp: "2024-11-29T09:15:00Z"
+          text: "The Terraform plan for the new staging cluster looks clean. 47 resources to add, 0 to change, 0 to destroy. Applying after lunch."
+        - user: "frank-devops (platform eng)"
+          timestamp: "2024-12-01T10:30:00Z"
+          text: "Reminder: we're at 78% disk on the Prometheus TSDB volume. I reduced retention to 2h last week to buy time. Long-term fix is the Thanos migration in Q1."
+
+    - name: "#ml-team"
+      messages:
+        - user: "hank-ml (ML eng)"
+          timestamp: "2024-11-29T13:00:00Z"
+          text: "Recommendation model v2.4 trained. A/B test shows 3.2% lift in click-through. Deploying to canary tomorrow."
+        - user: "hank-ml (ML eng)"
+          timestamp: "2024-11-30T10:00:00Z"
+          text: "v2.4 canary looks good. Promoting to production. Model refresh interval is still 24h via the product catalog gRPC call."
+        - user: "hank-ml (ML eng)"
+          timestamp: "2024-12-02T09:40:00Z"
+          text: "Model refresh has been failing since yesterday. gRPC deadline exceeded on ProductCatalog.ListProducts. Falling back to v2.3 stale cache. Not sure why the catalog service is slow."
+          # TANGENTIAL: Hank sees the symptom but doesn't connect it to Kafka
+
+    - name: "#general"
+      messages:
+        - user: "nina-leadership"
+          timestamp: "2024-12-01T09:00:00Z"
+          text: "Happy December everyone! Reminder that Q4 code freeze starts Dec 15. Get your PRs in early."
+        - user: "marcus-product"
+          timestamp: "2024-12-01T15:00:00Z"
+          text: "Black Friday numbers were great -- 2.3x normal checkout volume with no incidents. Big thanks to the platform team for the capacity work."
+        - user: "nina-leadership"
+          timestamp: "2024-12-02T10:15:00Z"
+          text: "I'm seeing reports of checkout issues. Can someone give me a status update? CFO is asking about revenue numbers."
+          # Nina asks for update but gets no immediate response -- incident channel is active
+
+    - name: "#random"
+      messages:
+        - user: "tyler (junior eng)"
+          timestamp: "2024-11-29T12:30:00Z"
+          text: "Has anyone tried the new ramen place on 3rd? Spicy miso is incredible."
+        - user: "lisa-support"
+          timestamp: "2024-11-29T12:45:00Z"
+          text: "Yes! The tantanmen is amazing. Go during off-peak though, line is 45 min at lunch."
+        - user: "carlos-qa"
+          timestamp: "2024-12-01T16:00:00Z"
+          text: "Anyone want tickets to the Warriors game on Thursday? Have 2 extras."
+        - user: "dan (backend eng)"
+          timestamp: "2024-12-02T08:30:00Z"
+          text: "Monday morning coffee status: not enough."
+
+    - name: "#standups"
+      messages:
+        - user: "dan (backend eng)"
+          timestamp: "2024-12-02T09:00:00Z"
+          text: "Yesterday: reviewed PR #1248 (x/net bump), merged. Today: working on checkout error handling improvements. Blocker: none."
+        - user: "priya (platform eng)"
+          timestamp: "2024-12-02T09:02:00Z"
+          text: "Yesterday: deployed shipping worker thread increase. Today: reviewing Terraform for staging cluster. Blocker: none."
+        - user: "tyler (junior eng)"
+          timestamp: "2024-12-02T09:03:00Z"
+          text: "Yesterday: investigated flaky test in CI (test_checkout_timeout). Today: continuing flaky test investigation. Blocker: need access to test environment logs."
+        - user: "hank-ml (ML eng)"
+          timestamp: "2024-12-02T09:04:00Z"
+          text: "Yesterday: promoted rec model v2.4 to prod. Today: monitoring A/B metrics. Blocker: none."
+        - user: "dave-fe (frontend eng)"
+          timestamp: "2024-12-02T09:05:00Z"
+          text: "Yesterday: migrated product page to App Router. Today: fixing CLS on ad slots. Blocker: none."
+
+    - name: "#pr-reviews"
+      messages:
+        - user: "bot: github"
+          timestamp: "2024-11-29T10:00:00Z"
+          text: "PR #1248 opened by dan: 'chore: bump golang.org/x/net v0.46.0 -> v0.47.0' -- needs 1 approval. Files: go.mod, go.sum"
+        - user: "bot: github"
+          timestamp: "2024-11-29T14:30:00Z"
+          text: "PR #1248 approved by priya. Merging."
+        - user: "bot: github"
+          timestamp: "2024-12-01T16:00:00Z"
+          text: "PR #1252 opened by priya: 'perf: increase shipping Actix worker threads 4 -> 8' -- needs 1 approval."
+        - user: "bot: github"
+          timestamp: "2024-12-01T16:20:00Z"
+          text: "PR #1252 approved by dan. Merging."
+
+    - name: "#deploys"
+      messages:
+        - user: "bot: deploy-notify"
+          timestamp: "2024-11-27T10:18:00Z"
+          text: "Deploy: kafka-consumer-config updated in production. Changed by: kevin-sre. Diff: session.timeout.ms 30000->6000, heartbeat.interval.ms 10000->2000, max.poll.records 100->500"
+        - user: "bot: deploy-notify"
+          timestamp: "2024-11-29T15:35:00Z"
+          text: "Deploy: checkout-service v3.8.1 -> v3.8.2 (dependency bump). Changed by: dan."
+        - user: "bot: deploy-notify"
+          timestamp: "2024-12-01T16:45:00Z"
+          text: "Deploy: shipping-service v2.3.4 -> v2.3.5 (worker threads). Changed by: priya."
+        - user: "bot: deploy-notify"
+          timestamp: "2024-12-01T22:00:00Z"
+          text: "Deploy: product-catalog-service v1.12.0 -> v1.12.1 (cache TTL update). Changed by: bot (scheduled)."
+
+    - name: "#alerts"
+      messages:
+        - user: "bot: grafana-alerting"
+          timestamp: "2024-11-28T03:15:00Z"
+          text: "[RESOLVED] HighMemory: email-service memory usage above 80% for 5m. Resolved after GC cycle."
+        - user: "bot: pagerduty"
+          timestamp: "2024-11-29T14:20:00Z"
+          text: "[RESOLVED] HighLatency: product-catalog P99 > 500ms. Duration: 3m. Auto-resolved."
+        - user: "bot: grafana-alerting"
+          timestamp: "2024-11-30T07:00:00Z"
+          text: "[RESOLVED] DiskSpaceLow: prometheus-server disk usage at 82%. Resolved after retention reduction."
+        - user: "bot: pagerduty"
+          timestamp: "2024-12-01T02:30:00Z"
+          text: "[RESOLVED] HighErrorRate: frontend 5xx rate above 1%. Duration: 2m. Transient spike during deploy."
+        - user: "bot: grafana-alerting"
+          timestamp: "2024-12-02T07:45:00Z"
+          text: "[FIRING] CheckoutSuccessRate: checkout_success_rate below 0.5 for 5m. Current: 0.40."
+          # This is a real signal but arrives among many resolved alerts
+        - user: "bot: pagerduty"
+          timestamp: "2024-12-02T09:10:00Z"
+          text: "[RESOLVED] HighLatency: recommendation_service P99 > 1s. Auto-resolved."
+          # MONITORING BLINDNESS: resolved because metrics went stale, not because issue fixed
+
+    - name: "#security"
+      messages:
+        - user: "sarah-security"
+          timestamp: "2024-11-29T11:00:00Z"
+          text: "Quarterly dependency audit complete. No critical CVEs. 3 medium-severity findings in transitive deps -- tracking in JIRA."
+        - user: "sarah-security"
+          timestamp: "2024-12-01T14:00:00Z"
+          text: "Reminder: TLS cert rotation is next week. All services should auto-rotate via cert-manager. If you have hardcoded certs, speak up."
+        - user: "sarah-security"
+          timestamp: "2024-12-02T09:50:00Z"
+          text: "Seeing a spike in failed login attempts on the frontend. 3x normal rate. Could be related to the checkout issues -- users retrying? Or is this a separate thing?"
+          # TANGENTIAL: Sarah sees a symptom (retries from frustrated users) but suggests it might be an attack
+
+    - name: "#oncall"
+      messages:
+        - user: "alicia (SRE on-call)"
+          timestamp: "2024-12-01T09:00:00Z"
+          text: "On-call handoff: quiet week. Only notable item was the Prometheus disk alert on Saturday, resolved by retention reduction. All services green."
+        - user: "frank-devops (platform eng)"
+          timestamp: "2024-12-01T09:05:00Z"
+          text: "Ack. The Prometheus retention change means we only have 2h of metrics history now. Keep that in mind if you need to investigate anything with a longer lookback."
+        - user: "alicia (SRE on-call)"
+          timestamp: "2024-12-02T09:20:00Z"
+          text: "Major incident in progress. Multiple teams affected. Checkout, accounting, monitoring, carts, recommendations all degraded. Incident bridge open in #incidents."
+
+    - name: "#postmortems"
+      messages:
+        - user: "frank-devops (platform eng)"
+          timestamp: "2024-06-15T14:00:00Z"
+          text: "Postmortem: Kafka broker disk full incident (June 12). Root cause: log.retention.bytes was set to -1 (unlimited) on the orders topic. Broker ran out of disk, all producers started failing. Fix: set retention to 1GB per partition. Action items: add disk usage alerts, document retention settings."
+        - user: "priya (platform eng)"
+          timestamp: "2024-06-15T14:30:00Z"
+          text: "Good writeup. One thing to add: when the broker disk filled, consumers also started failing because they couldn't commit offsets. The failure mode was confusing because consumer errors didn't mention disk at all."
+          # RED HERRING: past Kafka incident has surface-level similarity but completely different root cause
+        - user: "alicia (SRE on-call)"
+          timestamp: "2024-09-20T11:00:00Z"
+          text: "Postmortem: Cart service cache stampede (Sep 18). Root cause: Valkey failover during maintenance window caused all cart-service pods to reconnect simultaneously, overwhelming Valkey with connection storms. Fix: added connection pooling with jitter. Duration: 45 minutes."
+
+    - name: "#product"
+      messages:
+        - user: "marcus-product"
+          timestamp: "2024-11-29T10:00:00Z"
+          text: "Q4 conversion funnel analysis: checkout completion rate is 67%, up from 62% last quarter. Shipping quote step is the biggest drop-off at 12% abandonment."
+        - user: "marcus-product"
+          timestamp: "2024-12-01T11:00:00Z"
+          text: "Planning for holiday campaign starting Dec 8. Need to make sure the checkout flow can handle 3x normal volume. Platform team -- any concerns?"
+        - user: "marcus-product"
+          timestamp: "2024-12-02T10:00:00Z"
+          text: "Getting reports from customer success that checkout is broken. Conversion rate is near zero. This is a revenue emergency. What's the ETA on a fix?"
+          # Marcus is worried about business impact but doesn't have technical insight
+
+    - name: "#design"
+      messages:
+        - user: "rachel-design"
+          timestamp: "2024-11-28T15:00:00Z"
+          text: "Shared the new checkout flow mockups in Figma. Main change: shipping options are now inline instead of a separate step. Should reduce abandonment."
+        - user: "rachel-design"
+          timestamp: "2024-12-02T09:45:00Z"
+          text: "Is the site down? I'm trying to test the new ad slot placement on product pages and all the ad slots are showing blank. The product images seem to be loading slowly too."
+          # Rachel notices ad slots blank -- this is Branch E symptom but she thinks it's a frontend bug
+
+    - name: "#leadership"
+      messages:
+        - user: "nina-leadership"
+          timestamp: "2024-11-25T09:00:00Z"
+          text: "Q4 priorities reminder: (1) checkout reliability -- target 99.5% success rate, (2) holiday capacity prep, (3) cost optimization on infrastructure. Please flag any risks."
+        - user: "nina-leadership"
+          timestamp: "2024-12-02T10:20:00Z"
+          text: "I need a written incident summary for the exec team by 11 AM. What teams are impacted, what's the customer impact, and what's the timeline to resolution? @alicia"
+
+    - name: "#social"
+      messages:
+        - user: "lisa-support"
+          timestamp: "2024-11-27T16:00:00Z"
+          text: "Holiday party is Dec 20! Sign up for the Secret Santa by Friday. Budget is $25."
+        - user: "carlos-qa"
+          timestamp: "2024-11-29T17:00:00Z"
+          text: "Foosball tournament bracket is up in the break room. First round starts Monday at lunch."
+        - user: "tyler (junior eng)"
+          timestamp: "2024-12-01T12:00:00Z"
+          text: "Who wants to do a weekend hackathon? I want to build a Slack bot that auto-triages alerts."
+
+    - name: "#help-infra"
+      messages:
+        - user: "tyler (junior eng)"
+          timestamp: "2024-11-28T14:00:00Z"
+          text: "How do I get kubectl access to the kafka namespace? I want to look at broker logs."
+        - user: "frank-devops (platform eng)"
+          timestamp: "2024-11-28T14:15:00Z"
+          text: "You need to be in the platform-admin RBAC group. File a request in ServiceNow. Takes about 24h for approval."
+        - user: "dan (backend eng)"
+          timestamp: "2024-11-30T10:00:00Z"
+          text: "Is there a way to port-forward to the Kafka UI? I want to check consumer group status."
+        - user: "frank-devops (platform eng)"
+          timestamp: "2024-11-30T10:10:00Z"
+          text: "kubectl port-forward svc/kafka-ui 8080:80 -n kafka. But the UI only shows broker-level stuff. For consumer groups use kafka-consumer-groups.sh from inside the broker pod."
+
+    - name: "#help-data"
+      messages:
+        - user: "eve-data (data eng)"
+          timestamp: "2024-11-27T11:00:00Z"
+          text: "Does anyone know the schema for the accounting orders table? I need to build a revenue reconciliation query."
+        - user: "dan (backend eng)"
+          timestamp: "2024-11-27T11:15:00Z"
+          text: "Check src/accounting/schema.sql. Main table is `orders` with columns: id, customer_id, amount, currency, status, created_at."
+        - user: "eve-data (data eng)"
+          timestamp: "2024-12-02T10:05:00Z"
+          text: "I ran SELECT COUNT(*) FROM orders WHERE created_at > '2024-12-02 07:00:00' and got 0. Zero orders written in the last 3+ hours. This is definitely a data pipeline issue, not a dashboard bug."
+
+    - name: "#til"
+      messages:
+        - user: "tyler (junior eng)"
+          timestamp: "2024-11-26T16:00:00Z"
+          text: "TIL: Go's net/http.Transport has a MaxConnsPerHost setting that defaults to 0 (unlimited) but if you set it, connections queue up. Found this investigating our checkout connection pooling."
+        - user: "dan (backend eng)"
+          timestamp: "2024-11-28T11:00:00Z"
+          text: "TIL: Kafka consumer groups rebalance whenever a member joins or leaves. If your session.timeout is too aggressive, flaky members cause a 'rebalance storm'. Saw this in a blog post about Uber's Kafka infra."
+          # IRONIC: Dan shared this TIL knowledge but hasn't connected it to the current incident
+        - user: "priya (platform eng)"
+          timestamp: "2024-11-30T14:00:00Z"
+          text: "TIL: OTel Collector's memory_limiter processor should always be first in the pipeline. If it's after batch processors, you can still OOM before the limiter kicks in."
+        - user: "hank-ml (ML eng)"
+          timestamp: "2024-12-01T10:00:00Z"
+          text: "TIL: gRPC context propagation in Python carries the full OpenTelemetry baggage. If the collector is slow, context propagation adds latency to every gRPC call even if the call itself is fast."
+
+# ===========================================================================
+# SENTRY MCP SERVER
+# ===========================================================================
+sentry:
+  projects:
+    # DISTRACTOR: Connection pool leak (appears first to anchor attention)
+    - name: "ts-inside-payment-service"
+      issues:
+        - id: "PAY-293"
+          title: "HikariPool-1 - Connection leak detection triggered (leakDetectionThreshold=30000)"
+          count: 12
+          first_seen: "2024-11-28T14:00:00Z"
+          last_seen: "2024-12-02T08:30:00Z"
+          level: "warning"
+          tags:
+            pool_active: "7"
+            pool_max: "10"
+            note: "Slow leak: ~1 connection per day. Currently 7/10. Will exhaust in ~3 days."
+
+    # BRANCH A: Checkout
+    - name: "checkout-service"
+      issues:
+        - id: "CHKOUT-5012"
+          title: "context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
+          count: 4847
+          first_seen: "2024-12-02T07:45:00Z"
+          last_seen: "2024-12-02T10:05:00Z"
+          level: "error"
+          tags:
+            environment: "production"
+            runtime: "go1.24.2"
+          stacktrace: |
+            goroutine 847 [select, 53 minutes]:
+            net/http.(*Transport).getConn(0xc0004e2000, {0x0, 0x0}, ...)
+                /usr/local/go/src/net/http/transport.go:1363
+            go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp.(*Transport).RoundTrip(...)
+                /go/pkg/mod/go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp@v0.64.0/transport.go:93
+            net/http.(*Client).do(0xc0004e2200, 0xc000542800)
+                /usr/local/go/src/net/http/client.go:724
+            main.(*checkout).quoteShipping(...)
+                /app/main.go:469
+            main.(*checkout).prepareOrderItemsAndShippingQuoteFromCart(...)
+                /app/main.go:420
+            main.(*checkout).PlaceOrder(...)
+                /app/main.go:314
+
+        - id: "CHKOUT-5013"
+          title: "failed to send order confirmation email: context deadline exceeded"
+          count: 1847
+          first_seen: "2024-12-02T08:10:00Z"
+          level: "warning"
+
+        - id: "CHKOUT-5014"
+          title: "kafka: Failed to produce message: request timeout"
+          count: 293
+          first_seen: "2024-12-02T07:30:00Z"
+          level: "warning"
+          tags:
+            function: "sendToPostProcessor"
+
+    # BRANCH B: Accounting
+    - name: "accounting-service"
+      issues:
+        - id: "ACCT-847"
+          title: "Kafka consumer offset gap detected: expected 48293, got 51847"
+          count: 12
+          first_seen: "2024-12-02T08:00:00Z"
+          level: "warning"
+
+    # BRANCH C: OTel Collector -- SIGNIFICANT SILENCE
+    - name: "otel-collector"
+      issues: []
+
+    # BRANCH D: Cart
+    - name: "cart-service"
+      issues:
+        - id: "CART-456"
+          title: "gRPC transport is closing: connection reset by peer"
+          count: 347
+          first_seen: "2024-12-02T08:30:00Z"
+          level: "warning"
+          tags:
+            caller: "checkout-service"
+
+    # BRANCH E: Recommendations + Ads
+    - name: "recommendation-service"
+      issues:
+        - id: "REC-512"
+          title: "gRPC deadline exceeded calling ProductCatalog.ListProducts"
+          count: 89
+          first_seen: "2024-12-02T09:00:00Z"
+          level: "warning"
+
+    - name: "ad-service"
+      issues:
+        - id: "AD-293"
+          title: "java.lang.NullPointerException at AdService.getAds(AdService.java:247)"
+          count: 412
+          first_seen: "2024-12-02T09:15:00Z"
+          level: "error"
+
+    # Healthy services (significant silence)
+    - name: "shipping-service"
+      issues: []
+    - name: "payment-service"
+      issues: []
+    - name: "email-service"
+      issues: []
+
+    # Distractors
+    - name: "product-catalog"
+      issues:
+        - id: "PCAT-923"
+          title: "Transient cache miss on product lookup"
+          count: 12
+          first_seen: "2024-12-02T06:30:00Z"
+          level: "warning"
+
+    - name: "frontend"
+      issues:
+        - id: "FE-2847"
+          title: "PlaceOrder request timeout after 30s"
+          count: 3847
+          first_seen: "2024-12-02T07:45:00Z"
+          level: "error"
+        - id: "FE-2848"
+          title: "Product not found: DISCONTINUED-SKU-847"
+          count: 89
+          first_seen: "2024-12-02T09:20:00Z"
+          level: "warning"
+
+    # Additional frontend sub-projects (noise)
+    - name: "frontend-checkout"
+      issues:
+        - id: "FCHK-301"
+          title: "ResizeObserver loop completed with undelivered notifications"
+          count: 1247
+          first_seen: "2024-11-15T12:00:00Z"
+          level: "warning"
+          tags:
+            browser: "Chrome 131"
+            # This is a common benign browser warning, not related to the incident
+        - id: "FCHK-302"
+          title: "Hydration mismatch: server rendered 'loading' but client rendered 'error'"
+          count: 89
+          first_seen: "2024-12-02T08:00:00Z"
+          level: "error"
+          tags:
+            component: "CheckoutForm"
+            # Caused by the backend timeout -- client gets error while SSR expected loading
+
+    - name: "frontend-cart"
+      issues:
+        - id: "FCRT-188"
+          title: "TypeError: Cannot read properties of undefined (reading 'items')"
+          count: 34
+          first_seen: "2024-12-02T08:40:00Z"
+          level: "error"
+          tags:
+            component: "CartDrawer"
+            # Cart returns empty/undefined when connection resets
+
+    - name: "frontend-product"
+      issues:
+        - id: "FPRD-092"
+          title: "Image lazy-load timeout: CDN returned 504 for product thumbnail"
+          count: 7
+          first_seen: "2024-12-01T22:00:00Z"
+          level: "warning"
+          # Unrelated CDN blip from overnight, resolved by morning
+
+    - name: "load-generator"
+      issues: []
+      # Load generator is working perfectly -- it's generating the 2x Monday traffic
+
+    - name: "fraud-detection"
+      issues:
+        - id: "FRAUD-078"
+          title: "Duplicate charge detected: order_id=ord-8847a, customer_id=cust-3291"
+          count: 23
+          first_seen: "2024-12-02T08:15:00Z"
+          level: "error"
+          tags:
+            action: "auto_suspended"
+            # Real consequence of checkout retry storm -- customers getting charged twice
+        - id: "FRAUD-079"
+          title: "Anomaly score spike: checkout retry rate 340% above baseline"
+          count: 1
+          first_seen: "2024-12-02T09:00:00Z"
+          level: "warning"
+
+    - name: "currency-service"
+      issues:
+        - id: "CURR-015"
+          title: "Exchange rate API response slow: 1.2s (threshold 500ms)"
+          count: 3
+          first_seen: "2024-12-01T06:00:00Z"
+          level: "warning"
+          # Unrelated: upstream exchange rate API was briefly slow yesterday morning
+
+    - name: "otel-collector-metrics"
+      issues:
+        - id: "OTELM-002"
+          title: "Exporter queue full: dropping metric data points"
+          count: 847
+          first_seen: "2024-12-02T07:42:00Z"
+          level: "warning"
+          tags:
+            exporter: "kafka/metrics"
+            # Real signal: metrics pipeline is backed up because of Kafka
+
+    - name: "otel-collector-traces"
+      issues:
+        - id: "OTELT-003"
+          title: "Exporter queue full: dropping spans"
+          count: 12847
+          first_seen: "2024-12-02T07:41:00Z"
+          level: "warning"
+          tags:
+            exporter: "kafka/spans"
+            # Real signal: traces pipeline backed up
+
+    - name: "infrastructure-kafka"
+      issues: []
+      # Kafka brokers report no errors -- they don't consider rebalance storms as errors
+      # This is significant silence: broker is healthy, it's the consumer config that's wrong
+
+    - name: "infrastructure-valkey"
+      issues:
+        - id: "VALK-041"
+          title: "Connection pool spike: 47 active connections (baseline: 12)"
+          count: 3
+          first_seen: "2024-12-02T08:35:00Z"
+          level: "warning"
+          # Consequence of checkout goroutine buildup hitting cart/Valkey
+
+    # DISTRACTOR Sentry projects: real issues but not related to current incident
+    - name: "ts-seat-service"
+      issues:
+        - id: "SEAT-847"
+          title: "WARN: Seat assignment contention detected for train G1234"
+          count: 47
+          first_seen: "2024-11-25T10:00:00Z"
+          last_seen: "2024-12-02T09:45:00Z"
+          level: "warning"
+          tags:
+            note: "Duplicate seat assignments occurring 2-3 per day. Not yet causing customer complaints but growing."
+
+    - name: "ts-preserve-service"
+      issues:
+        - id: "PRESERVE-128"
+          title: "Order timestamp ordering violation: bought_date > current_time by 3s"
+          count: 89
+          first_seen: "2024-11-20T00:00:00Z"
+          last_seen: "2024-12-02T09:50:00Z"
+          level: "warning"
+          tags:
+            clock_offset: "-3000ms"
+            note: "CLOCK_OFFSET_MS configured for distributed tracing calibration but causing timestamp inversions"
+
+    - name: "infrastructure-postgres"
+      issues:
+        - id: "PG-089"
+          title: "Slow query: SELECT * FROM orders WHERE created_at > $1 (2847ms)"
+          count: 2
+          first_seen: "2024-12-02T09:55:00Z"
+          level: "warning"
+          # Eve's investigation query was slow because the table is large, not an incident symptom
+
+# ===========================================================================
+# PAGERDUTY MCP SERVER
+# ===========================================================================
+pagerduty:
+  incidents:
+    - id: "PD-94012"
+      title: "Checkout success rate below 50%"
+      urgency: "high"
+      status: "resolved"
+      resolved_at: "2024-12-02T09:25:00Z"
+      resolved_reason: "Auto-resolved: alert condition no longer true (metrics became stale)"
+      created_at: "2024-12-02T09:15:00Z"
+      service: "checkout-service"
+      timeline:
+        - timestamp: "2024-12-02T09:15:00Z"
+          action: "Alert triggered"
+          detail: "checkout_success_rate dropped to 0.40"
+        - timestamp: "2024-12-02T09:17:00Z"
+          action: "Acknowledged by alicia"
+        - timestamp: "2024-12-02T09:25:00Z"
+          action: "Auto-resolved"
+          detail: "Metrics became stale, rate() returned NaN, condition no longer true"
+
+    - id: "PD-94013"
+      title: "[AUTO-RESOLVED] HighLatency: recommendation_service P99 > 1s"
+      urgency: "medium"
+      status: "resolved"
+      created_at: "2024-12-02T09:10:00Z"
+      service: "recommendation-service"
+      timeline:
+        - timestamp: "2024-12-02T09:10:00Z"
+          action: "Alert triggered"
+        - timestamp: "2024-12-02T09:25:00Z"
+          action: "Auto-resolved"
+          detail: "Metrics became stale, rate() returned NaN, condition no longer true"
+          # THIS IS THE MONITORING BLINDNESS TRAP:
+          # Alert resolved NOT because the issue fixed itself, but because
+          # Prometheus stopped receiving data. The agent might see "resolved"
+          # and skip investigating.
+
+# ===========================================================================
+# PROMETHEUS / METRICS MCP SERVER
+# ===========================================================================
+metrics:
+  queries:
+    # Checkout symptoms
+    - query: "checkout_success_rate"
+      result:
+        current: 0.68
+        note: "STALE: cache_status=STALE. Last fresh value from 2024-12-02T08:00:00Z. Current value may differ."
+
+    - query: "checkout_latency_p99_seconds"
+      result:
+        current: 29.8
+        24h_ago: 0.85
+
+    # CONFIRMATION BIAS TRAP: looks like shipping is broken
+    - query: "checkout_to_shipping_latency_p99_seconds"
+      result:
+        current: 29.2
+        24h_ago: 0.18
+        note: "Checkout-observed shipping latency. But shipping itself is fast."
+
+    - query: "shipping_service_latency_p99_seconds"
+      result:
+        current: 0.12
+        note: "Shipping is fast when requests reach it"
+
+    - query: "shipping_service_request_rate"
+      result:
+        current: 5
+        24h_ago: 48
+        note: "Barely any requests reaching shipping"
+
+    # Misleading healthy metrics
+    - query: "payment_service_success_rate"
+      result:
+        current: 0.998
+
+    - query: "checkout_pod_memory_bytes"
+      result:
+        current: 478000000
+        limit: 536870912
+        note: "89% memory - high but not OOM"
+
+    - query: "checkout_pod_cpu_percent"
+      result:
+        current: 12
+
+    - query: "valkey_memory_used_bytes"
+      result:
+        current: 124000000
+        max: 536870912
+        note: "23% - healthy"
+
+    - query: "postgres_active_connections"
+      result:
+        current: 14
+        max: 100
+
+    # KEY SIGNALS
+    - query: "go_goroutines{service='checkout-service'}"
+      result:
+        current: 847
+        24h_ago: 47
+        note: "18x normal"
+
+    - query: "net_http_transport_conns_per_host{service='checkout-service'}"
+      result:
+        current: 20
+        note: "At configured maximum"
+
+    # KAFKA SIGNALS (require knowing to look)
+    - query: "kafka_consumer_group_lag{group='accounting-consumer'}"
+      result:
+        current: 3
+        note: "STALE: last updated 3 hours ago. Data may not reflect current state."
+        _stale_since: "2024-12-02T07:00:00Z"
+
+    - query: "kafka_consumer_group_rebalances_total{group='accounting-consumer'}"
+      result:
+        current: "NO DATA"
+        note: "Metric not found. OTel Collector may not be forwarding Kafka JMX metrics."
+
+    - query: "kafka_consumer_group_state{group='accounting-consumer'}"
+      result:
+        current: "NO DATA"
+        note: "Metric not found."
+
+    - query: "kafka_broker_partition_count"
+      result:
+        current: 12
+        note: "Normal"
+
+    - query: "kafka_broker_under_replicated_partitions"
+      result:
+        current: 0
+        note: "No under-replicated partitions -- brokers look healthy"
+
+    # OTEL COLLECTOR SIGNALS (stale or missing)
+    - query: "otelcol_exporter_send_failed_spans{exporter='kafka'}"
+      result:
+        current: "NO DATA"
+        note: "Collector's own metrics are also stale (circular: collector exports its own metrics)"
+
+    - query: "otelcol_processor_dropped_spans{processor='memory_limiter'}"
+      result:
+        current: "NO DATA"
+        note: "Would show dropped spans if collector could export its own metrics"
+
+    # PROMETHEUS RETENTION LIMIT: only 2h of data retained
+    # Agent cannot query metrics from before ~08:00. The incident started at ~07:15.
+    # Historical data for the critical first 45 minutes is GONE.
+    - query: "prometheus_tsdb_retention_period"
+      result:
+        current: "2h0m0s"
+        note: "Prometheus retention is only 2 hours (cost optimization). Data before 08:00 is gone."
+
+    - query: "prometheus_tsdb_lowest_timestamp"
+      result:
+        current: "2024-12-02T08:05:00Z"
+        note: "Oldest available data point. Anything from 07:15-08:05 (when incident started) cannot be queried."
+
+    # Monitoring health
+    - query: "prometheus_tsdb_head_series"
+      result:
+        current: 12847
+        note: "Some series are stale but count looks normal"
+
+    - query: "up{job='otel-collector'}"
+      result:
+        current: 1
+        note: "Collector is UP (health check passes) but not exporting data"
+
+    # Traffic pattern
+    - query: "frontend_request_rate"
+      result:
+        current: 612
+        24h_ago: 298
+        note: "Monday morning spike: 2x normal traffic"
+
+    # Revenue
+    - query: "accounting_orders_processed_total"
+      result:
+        current: 0
+        1h_ago: 0
+        24h_ago: 847
+        note: "Zero orders processed for 3+ hours"
+
+    # ===================================================================
+    # PROCESS METRICS (per service) -- all normal except checkout
+    # ===================================================================
+    - query: "process_cpu_seconds_total{service='checkout-service'}"
+      result:
+        current: 847.2
+        rate_1m: 0.12
+        note: "12% CPU -- low despite goroutine buildup (goroutines are waiting, not computing)"
+
+    - query: "process_cpu_seconds_total{service='accounting-service'}"
+      result:
+        current: 234.5
+        rate_1m: 0.03
+        note: "3% CPU -- idle because consumer is stuck rebalancing"
+
+    - query: "process_cpu_seconds_total{service='cart-service'}"
+      result:
+        current: 156.8
+        rate_1m: 0.08
+        note: "8% CPU -- normal"
+
+    - query: "process_cpu_seconds_total{service='recommendation-service'}"
+      result:
+        current: 89.3
+        rate_1m: 0.05
+        note: "5% CPU -- normal"
+
+    - query: "process_cpu_seconds_total{service='shipping-service'}"
+      result:
+        current: 45.1
+        rate_1m: 0.02
+        note: "2% CPU -- very low because barely any requests reaching it"
+
+    - query: "process_cpu_seconds_total{service='payment-service'}"
+      result:
+        current: 312.7
+        rate_1m: 0.07
+        note: "7% CPU -- normal"
+
+    - query: "process_cpu_seconds_total{service='email-service'}"
+      result:
+        current: 67.4
+        rate_1m: 0.04
+        note: "4% CPU -- normal"
+
+    - query: "process_cpu_seconds_total{service='ad-service'}"
+      result:
+        current: 198.6
+        rate_1m: 0.15
+        note: "15% CPU -- slightly elevated due to NullPointerException catch/retry loop"
+
+    - query: "process_resident_memory_bytes{service='checkout-service'}"
+      result:
+        current: 478000000
+        note: "478MB -- 89% of 512MB limit. High due to goroutine stacks."
+
+    - query: "process_resident_memory_bytes{service='accounting-service'}"
+      result:
+        current: 145000000
+        note: "145MB -- normal"
+
+    - query: "process_resident_memory_bytes{service='cart-service'}"
+      result:
+        current: 198000000
+        note: "198MB -- normal"
+
+    - query: "process_resident_memory_bytes{service='recommendation-service'}"
+      result:
+        current: 312000000
+        note: "312MB -- normal (includes model in memory)"
+
+    - query: "process_resident_memory_bytes{service='shipping-service'}"
+      result:
+        current: 67000000
+        note: "67MB -- normal"
+
+    - query: "process_resident_memory_bytes{service='otel-collector'}"
+      result:
+        current: 498000000
+        note: "498MB -- near memory_limiter threshold of 512MB"
+
+    - query: "process_open_fds{service='checkout-service'}"
+      result:
+        current: 892
+        24h_ago: 124
+        note: "7x normal -- file descriptors consumed by stuck HTTP connections"
+
+    - query: "process_open_fds{service='accounting-service'}"
+      result:
+        current: 47
+        note: "Normal"
+
+    - query: "process_open_fds{service='cart-service'}"
+      result:
+        current: 89
+        note: "Normal"
+
+    # ===================================================================
+    # GO RUNTIME METRICS (Go services: checkout, product-catalog)
+    # ===================================================================
+    - query: "go_goroutines{service='product-catalog'}"
+      result:
+        current: 34
+        note: "Normal goroutine count"
+
+    - query: "go_gc_duration_seconds{service='checkout-service',quantile='0.99'}"
+      result:
+        current: 0.087
+        24h_ago: 0.003
+        note: "GC P99 29x normal -- GC pressure from goroutine stacks"
+
+    - query: "go_gc_duration_seconds{service='product-catalog',quantile='0.99'}"
+      result:
+        current: 0.002
+        note: "Normal GC duration"
+
+    - query: "go_threads{service='checkout-service'}"
+      result:
+        current: 52
+        24h_ago: 18
+        note: "Elevated thread count"
+
+    - query: "go_threads{service='product-catalog'}"
+      result:
+        current: 14
+        note: "Normal"
+
+    - query: "go_memstats_alloc_bytes{service='checkout-service'}"
+      result:
+        current: 389000000
+        24h_ago: 45000000
+        note: "8.6x normal heap allocation"
+
+    - query: "go_memstats_alloc_bytes{service='product-catalog'}"
+      result:
+        current: 34000000
+        note: "Normal"
+
+    - query: "go_memstats_heap_objects{service='checkout-service'}"
+      result:
+        current: 4847000
+        24h_ago: 234000
+        note: "20x normal object count"
+
+    # ===================================================================
+    # HTTP SERVER METRICS
+    # ===================================================================
+    - query: "http_server_request_duration_seconds_bucket{service='checkout-service',handler='/api/checkout',le='30'}"
+      result:
+        current: 0.40
+        note: "Only 40% of requests complete within 30s (the timeout)"
+
+    - query: "http_server_request_duration_seconds_bucket{service='checkout-service',handler='/api/checkout',le='1'}"
+      result:
+        current: 0.08
+        note: "Only 8% of checkout requests complete within 1s"
+
+    - query: "http_server_request_duration_seconds_bucket{service='shipping-service',handler='/api/quote',le='0.5'}"
+      result:
+        current: 0.99
+        note: "99% of shipping requests that arrive complete within 500ms -- shipping is fast"
+
+    - query: "http_server_requests_total{service='checkout-service',handler='/api/checkout',status='200'}"
+      result:
+        rate_1m: 2.4
+        note: "Only 2.4 successful checkouts per second"
+
+    - query: "http_server_requests_total{service='checkout-service',handler='/api/checkout',status='504'}"
+      result:
+        rate_1m: 3.6
+        note: "3.6 timeouts per second -- more failures than successes"
+
+    - query: "http_server_requests_total{service='frontend',handler='/api/cart',status='200'}"
+      result:
+        rate_1m: 45
+        note: "Cart endpoint still serving -- but returning empty carts for some users"
+
+    - query: "http_server_requests_total{service='product-catalog',handler='/api/products',status='200'}"
+      result:
+        rate_1m: 12
+        note: "Product catalog healthy"
+
+    - query: "http_server_request_size_bytes{service='checkout-service',handler='/api/checkout',quantile='0.99'}"
+      result:
+        current: 2847
+        note: "Normal request size"
+
+    - query: "http_server_response_size_bytes{service='checkout-service',handler='/api/checkout',quantile='0.99'}"
+      result:
+        current: 156
+        note: "Small response -- most are error responses"
+
+    # ===================================================================
+    # gRPC SERVER METRICS
+    # ===================================================================
+    - query: "grpc_server_handled_total{service='cart-service',grpc_method='GetCart',grpc_code='OK'}"
+      result:
+        rate_1m: 38
+        note: "Normal request rate"
+
+    - query: "grpc_server_handled_total{service='cart-service',grpc_method='GetCart',grpc_code='Unavailable'}"
+      result:
+        rate_1m: 12
+        note: "Connection resets from checkout goroutine pressure"
+
+    - query: "grpc_server_handled_total{service='product-catalog',grpc_method='ListProducts',grpc_code='OK'}"
+      result:
+        rate_1m: 8
+        note: "Normal"
+
+    - query: "grpc_server_handled_total{service='product-catalog',grpc_method='ListProducts',grpc_code='DeadlineExceeded'}"
+      result:
+        rate_1m: 3
+        note: "Some deadline exceeded -- recommendation service calling with short deadline"
+
+    - query: "grpc_server_handling_seconds{service='cart-service',grpc_method='GetCart',quantile='0.99'}"
+      result:
+        current: 0.023
+        note: "Cart itself is fast -- the issue is connection resets, not latency"
+
+    - query: "grpc_server_handling_seconds{service='product-catalog',grpc_method='ListProducts',quantile='0.99'}"
+      result:
+        current: 0.089
+        note: "Normal"
+
+    - query: "grpc_server_handling_seconds{service='product-catalog',grpc_method='GetProduct',quantile='0.99'}"
+      result:
+        current: 0.012
+        note: "Normal"
+
+    # ===================================================================
+    # KAFKA METRICS (expanded)
+    # ===================================================================
+    - query: "kafka_producer_request_latency_avg{client='checkout-producer'}"
+      result:
+        current: 8472
+        24h_ago: 12
+        note: "Producer latency 706x normal -- brokers slow to ack due to rebalance coordination"
+
+    - query: "kafka_producer_record_send_total{client='checkout-producer',topic='orders'}"
+      result:
+        rate_1m: 0.3
+        24h_ago_rate: 48
+        note: "Almost no messages getting through"
+
+    - query: "kafka_producer_record_error_total{client='checkout-producer'}"
+      result:
+        rate_1m: 5.7
+        note: "Most produce attempts failing with timeout"
+
+    - query: "kafka_producer_buffer_available_bytes{client='checkout-producer'}"
+      result:
+        current: 0
+        max: 33554432
+        note: "Producer buffer completely full"
+
+    - query: "kafka_consumer_group_lag{group='otel-collector-spans'}"
+      result:
+        current: 128472
+        24h_ago: 0
+        note: "OTel collector span consumer also lagging massively"
+
+    - query: "kafka_consumer_group_lag{group='otel-collector-metrics'}"
+      result:
+        current: 89234
+        24h_ago: 0
+        note: "OTel collector metrics consumer also lagging"
+
+    - query: "kafka_consumer_group_state{group='otel-collector-spans'}"
+      result:
+        current: "PreparingRebalance"
+        note: "OTel collector consumer group also stuck in rebalance storm"
+
+    - query: "kafka_consumer_group_rebalances_total{group='otel-collector-spans'}"
+      result:
+        current: 623
+        24h_ago: 4
+        note: "Also experiencing rebalance storm"
+
+    - query: "kafka_topic_partitions{topic='orders'}"
+      result:
+        current: 3
+        note: "Normal"
+
+    - query: "kafka_topic_partitions{topic='otel-spans'}"
+      result:
+        current: 6
+        note: "Normal"
+
+    - query: "kafka_broker_request_latency_avg{broker='kafka-0'}"
+      result:
+        current: 247
+        24h_ago: 3
+        note: "Broker request latency elevated due to constant group coordination"
+
+    - query: "kafka_broker_network_io_bytes{broker='kafka-0',direction='in'}"
+      result:
+        rate_1m: 12847
+        note: "Low -- not much data getting through"
+
+    - query: "kafka_broker_cpu_percent{broker='kafka-0'}"
+      result:
+        current: 34
+        note: "Moderate CPU from group coordination overhead"
+
+    # ===================================================================
+    # CONTAINER METRICS
+    # ===================================================================
+    - query: "container_cpu_usage_seconds_total{pod=~'checkout-.*'}"
+      result:
+        rate_1m: 0.12
+        note: "Low CPU -- goroutines are blocked, not computing"
+
+    - query: "container_memory_working_set_bytes{pod=~'checkout-.*'}"
+      result:
+        current: 487000000
+        limit: 536870912
+        note: "91% memory usage"
+
+    - query: "container_cpu_usage_seconds_total{pod=~'accounting-.*'}"
+      result:
+        rate_1m: 0.03
+        note: "Very low -- consumer is idle during rebalance"
+
+    - query: "container_memory_working_set_bytes{pod=~'accounting-.*'}"
+      result:
+        current: 145000000
+        limit: 268435456
+        note: "54% -- normal"
+
+    - query: "container_cpu_usage_seconds_total{pod=~'cart-.*'}"
+      result:
+        rate_1m: 0.08
+        note: "Normal"
+
+    - query: "container_memory_working_set_bytes{pod=~'cart-.*'}"
+      result:
+        current: 198000000
+        limit: 536870912
+        note: "37% -- normal"
+
+    - query: "container_cpu_usage_seconds_total{pod=~'otel-collector-.*'}"
+      result:
+        rate_1m: 0.22
+        note: "Elevated -- memory_limiter processor doing work to drop data"
+
+    - query: "container_memory_working_set_bytes{pod=~'otel-collector-.*'}"
+      result:
+        current: 501000000
+        limit: 536870912
+        note: "93% -- near limit, memory_limiter actively dropping"
+
+    - query: "container_network_receive_bytes_total{pod=~'kafka-.*'}"
+      result:
+        rate_1m: 12847
+        note: "Low network in -- less data being produced"
+
+    - query: "container_network_transmit_bytes_total{pod=~'kafka-.*'}"
+      result:
+        rate_1m: 89234
+        note: "High network out -- group coordinator responses to rebalancing consumers"
+
+    - query: "container_cpu_usage_seconds_total{pod=~'kafka-.*'}"
+      result:
+        rate_1m: 0.34
+        note: "Moderate -- group coordination overhead"
+
+    - query: "container_memory_working_set_bytes{pod=~'kafka-.*'}"
+      result:
+        current: 1847000000
+        limit: 4294967296
+        note: "43% -- normal"
+
+    - query: "container_restarts_total{pod=~'cart-.*'}"
+      result:
+        current: 2
+        note: "Cart was restarted 15 min ago (manual restart by dave-fe)"
+
+    - query: "container_restarts_total{pod=~'checkout-.*'}"
+      result:
+        current: 0
+        note: "Checkout has not been restarted"
+
+    # ===================================================================
+    # NODE METRICS (host-level)
+    # ===================================================================
+    - query: "node_cpu_seconds_total{mode='idle'}"
+      result:
+        rate_1m: 0.72
+        note: "72% idle -- host not CPU constrained"
+
+    - query: "node_memory_MemAvailable_bytes"
+      result:
+        current: 12847000000
+        total: 32000000000
+        note: "40% memory available -- host not memory constrained"
+
+    - query: "node_filesystem_avail_bytes{mountpoint='/var/lib/prometheus'}"
+      result:
+        current: 2147483648
+        total: 10737418240
+        note: "20% disk free on Prometheus volume (why retention was reduced)"
+
+    - query: "node_filesystem_avail_bytes{mountpoint='/var/lib/kafka'}"
+      result:
+        current: 42000000000
+        total: 107000000000
+        note: "39% disk free on Kafka volume -- plenty of space"
+
+    - query: "node_network_receive_bytes_total{device='eth0'}"
+      result:
+        rate_1m: 4847000
+        note: "Normal network throughput"
+
+    - query: "node_network_transmit_bytes_total{device='eth0'}"
+      result:
+        rate_1m: 3234000
+        note: "Normal"
+
+    - query: "node_load1"
+      result:
+        current: 2.4
+        note: "Normal load average for 8-core host"
+
+    - query: "node_load5"
+      result:
+        current: 2.1
+        note: "Normal"
+
+    - query: "node_disk_io_time_seconds_total{device='sda'}"
+      result:
+        rate_1m: 0.04
+        note: "Low disk I/O -- not a bottleneck"
+
+    # ===================================================================
+    # MISCELLANEOUS SERVICE METRICS
+    # ===================================================================
+    - query: "flagd_evaluation_total{flag='kafkaQueueProblems'}"
+      result:
+        rate_1m: 48
+        note: "Flag being evaluated but value is 0 (disabled)"
+
+    - query: "flagd_evaluation_total{flag='cartFailure'}"
+      result:
+        rate_1m: 45
+        note: "Flag being evaluated but value is false"
+
+    - query: "valkey_connected_clients"
+      result:
+        current: 47
+        24h_ago: 12
+        note: "Elevated due to checkout connection pool saturation cascading to cart/Valkey"
+
+    - query: "valkey_keyspace_hits_total"
+      result:
+        rate_1m: 234
+        note: "Normal hit rate"
+
+    - query: "valkey_keyspace_misses_total"
+      result:
+        rate_1m: 12
+        note: "Normal miss rate"
+
+    - query: "postgres_connections_active{database='accounting'}"
+      result:
+        current: 3
+        max: 100
+        note: "Very few active connections -- accounting consumer is idle"
+
+    - query: "postgres_replication_lag_bytes"
+      result:
+        current: 0
+        note: "No replication lag"
+
+    - query: "email_service_send_total{status='success'}"
+      result:
+        rate_1m: 0.5
+        note: "Very few emails sending -- most checkout flows failing before email step"
+
+    - query: "email_service_send_total{status='error'}"
+      result:
+        rate_1m: 2.1
+        note: "Email errors from checkout timeout cascading"
+
+    - query: "ad_service_request_total{status='error'}"
+      result:
+        rate_1m: 8.7
+        note: "Ad service errors due to NullPointerException"
+
+    - query: "ad_service_request_total{status='success'}"
+      result:
+        rate_1m: 3.2
+        note: "Some ads still serving from cache"
+
+    - query: "recommendation_service_cache_age_seconds"
+      result:
+        current: 172800
+        note: "48 hours since last successful cache refresh"
+
+    - query: "fraud_detection_auto_suspensions_total"
+      result:
+        current: 23
+        1h_ago: 23
+        24h_ago: 0
+        note: "23 fraud auto-suspensions from duplicate charges"
+
+    - query: "load_generator_requests_total"
+      result:
+        rate_1m: 612
+        note: "Load generator running at normal Monday morning rate"
+
+    - query: "currency_service_request_duration_seconds{quantile='0.99'}"
+      result:
+        current: 0.045
+        note: "Normal -- currency service is healthy"
+
+    # DISTRACTOR: Connection pool leak (real but not causing current incident)
+    - query: "hikaricp_connections_active{service='ts-inside-payment-service'}"
+      result:
+        current: 7
+        max: 10
+        24h_ago: 6
+        7d_ago: 3
+        note: "Slowly climbing. Leak rate ~1/day. Will exhaust in ~3 days."
+
+    - query: "hikaricp_connections_pending{service='ts-inside-payment-service'}"
+      result:
+        current: 0
+        note: "No pending yet -- pool not exhausted (7/10)"
+
+    # DISTRACTOR: Seat contention (real but not related)
+    - query: "seat_assignment_contention_total{service='ts-seat-service'}"
+      result:
+        current: 47
+        24h_ago: 44
+        note: "Growing by 2-3 per day. Duplicate seat warnings."
+
+    # DISTRACTOR: Clock skew (real but not related)
+    - query: "clock_offset_seconds{service='ts-preserve-service'}"
+      result:
+        current: -3.0
+        note: "Preserve-service clock is 3 seconds behind. CLOCK_OFFSET_MS=-3000 configured."
+
+    - query: "order_timestamp_inversions_total"
+      result:
+        current: 89
+        note: "Orders where bought_date > system_time. Caused by clock skew."
+
+# ===========================================================================
+# APPLICATION LOGS
+# ===========================================================================
+logs:
+  services:
+    - name: "checkout-service"
+      log_file: "/var/log/checkout/app.log"
+      entries:
+        # Current errors (agent sees with level=ERROR)
+        - timestamp: "2024-12-02T10:05:47Z"
+          level: "ERROR"
+          message: "failed POST to shipping service: context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
+          function: "quoteShipping"
+
+        - timestamp: "2024-12-02T10:05:42Z"
+          level: "ERROR"
+          message: "shipping quote failure: context deadline exceeded"
+          function: "prepareOrderItemsAndShippingQuoteFromCart"
+
+        - timestamp: "2024-12-02T10:05:33Z"
+          level: "ERROR"
+          message: "failed POST to email service: context deadline exceeded"
+          function: "sendOrderConfirmation"
+
+        # LOG ROTATION GAP: logs from 07:15-07:45 are MISSING
+        # An aggressive logrotate cron runs at 07:00 with maxsize=50M.
+        # The burst of Kafka producer errors filled the log quickly.
+        # By the time someone looks, the critical 30-minute window is gone.
+        - timestamp: "2024-12-02T07:14:59Z"
+          level: "INFO"
+          message: "[PlaceOrder] user_id=usr-3847a user_currency=USD"
+          function: "PlaceOrder"
+
+        # --- GAP: 07:15 to 07:45 MISSING (logrotate) ---
+        # The Kafka producer warnings that would show the blocking select
+        # happened during this window and are GONE.
+
+        - timestamp: "2024-12-02T07:46:01Z"
+          level: "ERROR"
+          message: "failed POST to shipping service: context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
+          function: "quoteShipping"
+
+        - timestamp: "2024-12-02T07:46:05Z"
+          level: "INFO"
+          message: "--- log resumed after rotation (previous: app.log.1.gz, 47MB) ---"
+          function: "logrotate"
+
+        # Some Kafka warnings AFTER the gap (but the initial ones are lost)
+        - timestamp: "2024-12-02T07:48:00Z"
+          level: "WARN"
+          message: "kafka: Failed to produce message to topic 'orders': request timeout"
+          function: "sendToPostProcessor"
+
+        - timestamp: "2024-12-02T07:50:00Z"
+          level: "WARN"
+          message: "Context canceled before success message received: context deadline exceeded"
+          function: "sendToPostProcessor"
+
+        - timestamp: "2024-12-02T08:15:00Z"
+          level: "INFO"
+          message: "Warning: FeatureFlag 'kafkaQueueProblems' is activated, overloading queue now."
+          function: "sendToPostProcessor"
+          # RED HERRING: misleading log from debug code left in sendToPostProcessor
+
+        # TRUNCATED STACKTRACE: OTel instrumentation adds frames that obscure
+        # the actual blocking point. The goroutine dump via pprof would show more,
+        # but pprof endpoint returns timeout (too many goroutines to serialize).
+        - timestamp: "2024-12-02T09:30:00Z"
+          level: "ERROR"
+          message: "goroutine dump failed: http: Handler timeout (pprof endpoint unresponsive with 847+ goroutines)"
+          function: "debug/pprof"
+
+    - name: "accounting-service"
+      log_file: "/var/log/accounting/app.log"
+      entries:
+        - timestamp: "2024-12-02T08:00:12Z"
+          level: "WARN"
+          message: "Kafka consumer offset gap detected: expected offset 48293, received 51847. 3554 messages may have been lost."
+          function: "ProcessOrderMessage"
+
+        - timestamp: "2024-12-02T07:45:00Z"
+          level: "INFO"
+          message: "Consumer group rebalancing triggered. Generation: 423. Revoking partitions."
+          function: "OnPartitionsRevoked"
+
+        # PII REDACTION breaks traceability
+        - timestamp: "2024-12-02T08:01:00Z"
+          level: "INFO"
+          message: "Processing order ord-[REDACTED] for customer cust-[REDACTED] amount $[REDACTED]"
+          function: "ProcessOrderMessage"
+          # Agent cannot correlate these with checkout logs because IDs are redacted.
+          # The PII filter was added by compliance 2 months ago.
+
+        - timestamp: "2024-12-02T08:05:00Z"
+          level: "WARN"
+          message: "Consumer position reset: rebalance in progress. Partitions revoked: [0,1,2]. This is rebalance #428 since startup."
+          function: "OnPartitionsRevoked"
+
+    - name: "otel-collector"
+      log_file: "/var/log/otel-collector/collector.log"
+      entries:
+        - timestamp: "2024-12-02T07:40:00Z"
+          level: "WARN"
+          message: "Dropping data due to memory_limiter processor. Current memory: 487MB, limit: 512MB"
+          function: "memory_limiter"
+
+        - timestamp: "2024-12-02T07:41:00Z"
+          level: "WARN"
+          message: "Exporter kafka/spans: sending queue is full. Dropping spans."
+          function: "kafka_exporter"
+
+        # COLLECTOR LOGS ARE ALSO AFFECTED: the collector exports its own
+        # telemetry via the same pipeline. When the pipeline is backed up,
+        # the collector's own logs become sparse and unreliable.
+        - timestamp: "2024-12-02T07:42:00Z"
+          level: "WARN"
+          message: "Exporter kafka/metrics: sending queue is full. Dropping metric data points."
+          function: "kafka_exporter"
+
+        - timestamp: "2024-12-02T07:43:00Z"
+          level: "INFO"
+          message: "memory_limiter: refusing data. current=498MB limit=512MB spike_limit=460MB"
+          function: "memory_limiter"
+
+        # NOTE: no logs after 07:43 -- collector's own logging became unreliable
+        # because it routes through itself. Circular dependency.
+
+    - name: "cart-service"
+      log_file: "/var/log/cart/app.log"
+      entries:
+        - timestamp: "2024-12-02T08:35:00Z"
+          level: "WARN"
+          message: "gRPC connection from checkout-service reset: transport is closing"
+          function: "GetCart"
+
+        - timestamp: "2024-12-02T08:35:05Z"
+          level: "INFO"
+          message: "Reconnection attempt from checkout-service"
+          function: "ConnectionManager"
+
+        # .NET exception with typical stack noise
+        - timestamp: "2024-12-02T08:36:00Z"
+          level: "ERROR"
+          message: "System.InvalidOperationException: Connection pool exhausted. All connections in use. at Grpc.Net.Client.Internal.GrpcChannel.CreateCallInvoker() at ValkeyCartStore.GetCartAsync(String userId) --- End of stack trace from previous location --- at Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http.HttpProtocol.ProcessRequests[TContext](IHttpApplication`1 application)"
+          function: "GetCartAsync"
+
+    - name: "recommendation-service"
+      log_file: "/var/log/recommendation/app.log"
+      entries:
+        - timestamp: "2024-12-02T08:50:00Z"
+          level: "WARN"
+          message: "Product catalog refresh failed: grpc deadline exceeded. Using stale cache (age: 48h)."
+          function: "refresh_catalog"
+
+        - timestamp: "2024-12-02T08:50:05Z"
+          level: "INFO"
+          message: "Serving recommendations from cached model v2.3 (last refresh: 2024-11-30T10:00:00Z)"
+          function: "ListRecommendations"
+
+        # Python traceback with OTel noise
+        - timestamp: "2024-12-02T09:00:00Z"
+          level: "ERROR"
+          message: "Traceback (most recent call last):\n  File \"/app/recommendation_server.py\", line 89, in ListRecommendations\n    product_catalog = self.stub.ListProducts(demo_pb2.Empty())\n  File \"/usr/local/lib/python3.12/site-packages/grpc/_channel.py\", line 1181, in __call__\n    return _end_unary_response_blocking(state, call, False, None)\n  File \"/usr/local/lib/python3.12/site-packages/opentelemetry/instrumentation/grpc/_client.py\", line 147, in _intercept\n    # [12 more OTel instrumentation frames truncated]\ngrpc.RpcError: <_InactiveRpcError: StatusCode.DEADLINE_EXCEEDED>"
+          function: "ListRecommendations"
+
+    # KAFKA BROKER LOGS -- only accessible via kubectl, not in /var/log
+    # Agent would need to know to check: kubectl logs kafka-0 -n kafka
+    - name: "kafka-broker"
+      log_file: "kubectl logs kafka-0 -n kafka (not in /var/log -- must use kubectl)"
+      entries:
+        - timestamp: "2024-12-02T07:20:00Z"
+          level: "INFO"
+          message: "[GroupCoordinator 0]: Preparing to rebalance group accounting-consumer in state PreparingRebalance with old generation 422"
+          function: "GroupCoordinator"
+
+        - timestamp: "2024-12-02T07:20:05Z"
+          level: "INFO"
+          message: "[GroupCoordinator 0]: Stabilized group accounting-consumer generation 423"
+          function: "GroupCoordinator"
+
+        - timestamp: "2024-12-02T07:20:15Z"
+          level: "INFO"
+          message: "[GroupCoordinator 0]: Member accounting-consumer-0-xxxx in group accounting-consumer has failed, removing it from the group"
+          function: "GroupCoordinator"
+
+        - timestamp: "2024-12-02T07:20:16Z"
+          level: "INFO"
+          message: "[GroupCoordinator 0]: Preparing to rebalance group accounting-consumer in state PreparingRebalance with old generation 423"
+          function: "GroupCoordinator"
+          # This repeats every 6-8 seconds -- the rebalance storm
+
+# ===========================================================================
+# FEATURE FLAGS
+# ===========================================================================
+feature_flags:
+  - flag: "q4-provider-migration"
+    current_value: "current"
+    state: "ENABLED"
+    last_modified: "2024-11-28T07:13:00Z"
+
+  - flag: "paymentUnreachable"
+    current_value: false
+    state: "ENABLED"
+
+  - flag: "kafkaQueueProblems"
+    current_value: 0
+    state: "ENABLED"
+
+  - flag: "loadGeneratorFloodHomepage"
+    current_value: 0
+    state: "ENABLED"
+
+  - flag: "productCatalogFailure"
+    current_value: false
+    state: "ENABLED"
+
+  - flag: "cartFailure"
+    current_value: false
+    state: "ENABLED"
+
+  - flag: "paymentFailure"
+    current_value: 0
+    state: "ENABLED"
+
+  - flag: "adHighCpu"
+    current_value: false
+    state: "ENABLED"
+
+  - flag: "adFailure"
+    current_value: false
+    state: "ENABLED"
+
+  - flag: "recommendationCacheFailure"
+    current_value: false
+    state: "ENABLED"
+
+  - flag: "imageSlowLoad"
+    current_value: 0
+    state: "ENABLED"
+
+  - flag: "failedReadinessProbe"
+    current_value: false
+    state: "ENABLED"
+
+  - flag: "emailMemoryLeak"
+    current_value: 0
+    state: "ENABLED"
+
+  - flag: "adManualGc"
+    current_value: false
+    state: "ENABLED"
+
+  - flag: "llmInaccurateResponse"
+    current_value: false
+    state: "ENABLED"
+
+# ===========================================================================
+# GIT HISTORY
+# ===========================================================================
+git:
+  recent_commits:
+    # === December 2024 ===
+    - hash: "e1f2a56"
+      date: "2024-12-01"
+      author: "bot"
+      message: "chore: config refresh (no changes)"
+      files: []
+
+    - hash: "p12d4e5"
+      date: "2024-12-01"
+      author: "priya"
+      message: "perf: increase shipping Actix worker threads 4 -> 8"
+      files: ["src/shipping/Cargo.toml"]
+
+    - hash: "d3a9c71"
+      date: "2024-12-01"
+      author: "bot: scheduled"
+      message: "chore: update product-catalog cache TTL from 300s to 600s"
+      files: ["src/product-catalog/config.yaml"]
+
+    - hash: "c8e2f14"
+      date: "2024-12-01"
+      author: "rachel-design"
+      message: "docs: update checkout flow wireframes for inline shipping"
+      files: ["docs/design/checkout-flow-v2.md"]
+
+    - hash: "b7d4e93"
+      date: "2024-12-01"
+      author: "marcus-product"
+      message: "docs: add Q4 holiday campaign requirements"
+      files: ["docs/product/q4-campaign.md"]
+
+    # === November 29-30 ===
+    - hash: "f47b2e3"
+      date: "2024-11-29"
+      author: "dan"
+      message: "chore: bump golang.org/x/net v0.46.0 -> v0.47.0"
+      files: ["src/checkout/go.mod", "src/checkout/go.sum"]
+
+    - hash: "a1b7c93"
+      date: "2024-11-29"
+      author: "bot: dependabot"
+      message: "chore(deps): bump google.golang.org/grpc from 1.67.0 to 1.67.1"
+      files: ["src/checkout/go.mod", "src/checkout/go.sum"]
+
+    - hash: "e4f8d21"
+      date: "2024-11-29"
+      author: "bot: dependabot"
+      message: "chore(deps): bump opentelemetry-sdk from 1.28.0 to 1.28.1 in /src/recommendation"
+      files: ["src/recommendation/requirements.txt"]
+
+    - hash: "c3b9a47"
+      date: "2024-11-29"
+      author: "sarah-security"
+      message: "security: update TLS cipher suite config for compliance"
+      files: ["kubernetes/tls-config.yaml"]
+
+    - hash: "f9e2d83"
+      date: "2024-11-29"
+      author: "carlos-qa"
+      message: "test: add integration tests for cart-checkout flow"
+      files: ["test/integration/cart_checkout_test.go"]
+
+    - hash: "d2c7b45"
+      date: "2024-11-30"
+      author: "dave-fe"
+      message: "feat: migrate product detail page to Next.js App Router"
+      files: ["src/frontend/app/product/[id]/page.tsx", "src/frontend/app/product/[id]/layout.tsx"]
+
+    - hash: "a6e1f78"
+      date: "2024-11-30"
+      author: "hank-ml"
+      message: "feat: deploy recommendation model v2.4 to production"
+      files: ["src/recommendation/model_config.yaml"]
+
+    - hash: "b5d3c92"
+      date: "2024-11-30"
+      author: "tyler"
+      message: "test: fix flaky test_checkout_timeout by increasing deadline"
+      files: ["test/unit/checkout_test.go"]
+
+    # === November 27-28 ===
+    - hash: "k7f2b91"
+      date: "2024-11-27"
+      author: "kevin-sre"
+      message: "perf: tune Kafka consumer for lower latency"
+      files: ["docker-compose.yml", "src/accounting/appsettings.json"]
+
+    - hash: "g8h4j27"
+      date: "2024-11-27"
+      author: "frank-devops"
+      message: "ops: migrate Grafana dashboards to v11 format"
+      files: ["grafana/dashboards/checkout.json", "grafana/dashboards/kafka-overview.json", "grafana/dashboards/services.json"]
+
+    - hash: "j2k5m81"
+      date: "2024-11-27"
+      author: "bot: dependabot"
+      message: "chore(deps): bump @opentelemetry/sdk-node from 0.56.0 to 0.57.0 in /src/frontend"
+      files: ["src/frontend/package.json", "src/frontend/package-lock.json"]
+
+    - hash: "m7n3p49"
+      date: "2024-11-27"
+      author: "priya"
+      message: "ops: add resource limits to recommendation-service deployment"
+      files: ["kubernetes/recommendation-service.yaml"]
+
+    - hash: "q4r8s16"
+      date: "2024-11-28"
+      author: "frank-devops"
+      message: "ops: reduce Prometheus retention to 2h (disk space critical)"
+      files: ["kubernetes/prometheus-config.yaml"]
+
+    - hash: "t9u2v53"
+      date: "2024-11-28"
+      author: "bot: dependabot"
+      message: "chore(deps): bump tokio from 1.41.0 to 1.41.1 in /src/shipping"
+      files: ["src/shipping/Cargo.toml", "src/shipping/Cargo.lock"]
+
+    - hash: "w5x1y87"
+      date: "2024-11-28"
+      author: "dan"
+      message: "refactor: simplify checkout error handling for HTTP calls"
+      files: ["src/checkout/main.go"]
+
+    - hash: "z3a6b24"
+      date: "2024-11-28"
+      author: "carlos-qa"
+      message: "test: add load test scenario for Black Friday traffic pattern"
+      files: ["test/load/black_friday.js"]
+
+    # === November 25-26 ===
+    - hash: "a8f3c21"
+      date: "2024-11-25"
+      author: "priya"
+      message: "perf: consolidate outbound HTTP transports for connection reuse"
+      files: ["src/checkout/main.go"]
+
+    - hash: "c7d2e98"
+      date: "2024-11-25"
+      author: "bot: dependabot"
+      message: "chore(deps): bump express from 4.21.0 to 4.21.1 in /src/frontend"
+      files: ["src/frontend/package.json", "src/frontend/package-lock.json"]
+
+    - hash: "e4f9g31"
+      date: "2024-11-25"
+      author: "tyler"
+      message: "docs: add troubleshooting section to on-call runbook"
+      files: ["docs/runbooks/on-call.md"]
+
+    - hash: "h2j5k67"
+      date: "2024-11-26"
+      author: "bot: dependabot"
+      message: "chore(deps): bump sarama from 1.43.2 to 1.43.3 in /src/checkout"
+      files: ["src/checkout/go.mod", "src/checkout/go.sum"]
+
+    - hash: "l8m4n93"
+      date: "2024-11-26"
+      author: "dave-fe"
+      message: "fix: correct CLS issue on product page ad slots"
+      files: ["src/frontend/components/AdSlot.tsx"]
+
+    - hash: "p1q7r28"
+      date: "2024-11-26"
+      author: "frank-devops"
+      message: "ci: add Kafka health check to integration test pipeline"
+      files: [".github/workflows/integration-tests.yml"]
+
+    # === November 22-24 ===
+    - hash: "7c3e8a2"
+      date: "2024-11-23"
+      author: "marcus-product"
+      message: "feat: add order total to PlaceOrder span attributes"
+      files: ["src/checkout/main.go"]
+
+    - hash: "s4t9u62"
+      date: "2024-11-23"
+      author: "bot: dependabot"
+      message: "chore(deps): bump protobuf from 5.28.0 to 5.28.1 in /src/recommendation"
+      files: ["src/recommendation/requirements.txt"]
+
+    - hash: "v7w2x95"
+      date: "2024-11-23"
+      author: "sarah-security"
+      message: "security: enable PII redaction in accounting service logs"
+      files: ["src/accounting/logging_config.json"]
+
+    - hash: "y5z1a38"
+      date: "2024-11-24"
+      author: "kevin-sre"
+      message: "docs: update Kafka operational runbook with consumer tuning guidance"
+      files: ["docs/runbooks/kafka.md"]
+
+    - hash: "b8c3d71"
+      date: "2024-11-24"
+      author: "bot: dependabot"
+      message: "chore(deps): bump dotnet SDK from 8.0.402 to 8.0.403 in /src/cart"
+      files: ["src/cart/src/Directory.Build.props"]
+
+    # === November 19-21 ===
+    - hash: "b92e147"
+      date: "2024-11-20"
+      author: "james"
+      message: "feat: add shipping address pre-check to checkout flow"
+      files: ["src/checkout/address_validation.go", "src/checkout/main.go"]
+
+    - hash: "9b5d1f4"
+      date: "2024-11-19"
+      author: "dan"
+      message: "refactor: extract money helpers to separate package"
+      files: ["src/checkout/money/money.go"]
+
+    - hash: "e4f7g19"
+      date: "2024-11-19"
+      author: "tom-mobile"
+      message: "feat: add mobile deep link support for product pages"
+      files: ["src/frontend/utils/deeplink.ts"]
+
+    - hash: "h1j4k52"
+      date: "2024-11-20"
+      author: "bot: dependabot"
+      message: "chore(deps): bump jackson-databind from 2.17.2 to 2.18.0 in /src/ad"
+      files: ["src/ad/build.gradle.kts"]
+
+    - hash: "l7m2n85"
+      date: "2024-11-20"
+      author: "frank-devops"
+      message: "ci: parallelize integration tests to reduce CI time from 12m to 7m"
+      files: [".github/workflows/integration-tests.yml"]
+
+    - hash: "p3q8r18"
+      date: "2024-11-21"
+      author: "carlos-qa"
+      message: "test: add regression tests for duplicate charge prevention"
+      files: ["test/integration/fraud_detection_test.go"]
+
+    - hash: "s6t1u41"
+      date: "2024-11-21"
+      author: "eve-data"
+      message: "feat: add revenue reconciliation query to data pipeline"
+      files: ["src/accounting/queries/reconciliation.sql"]
+
+    - hash: "v9w4x74"
+      date: "2024-11-21"
+      author: "priya"
+      message: "ops: tune OTel Collector memory_limiter to 512MB limit"
+      files: ["src/otel-collector/otelcol-config.yml"]
+
+    # === November 15-18 ===
+    - hash: "r3t8a92"
+      date: "2024-11-15"
+      author: "kevin-sre"
+      message: "ops: reduce Kafka log.retention.hours from 24 to 4 (cost optimization)"
+      files: ["docker-compose.yml"]
+
+    - hash: "c4d8f93"
+      date: "2024-11-18"
+      author: "james"
+      message: "perf: cache flag evaluations to reduce flagd load on hot paths"
+      files: ["src/checkout/address_validation.go"]
+
+    - hash: "y2z7a07"
+      date: "2024-11-15"
+      author: "bot: dependabot"
+      message: "chore(deps): bump werkzeug from 3.0.4 to 3.0.6 in /src/recommendation"
+      files: ["src/recommendation/requirements.txt"]
+
+    - hash: "b5c9d40"
+      date: "2024-11-16"
+      author: "dan"
+      message: "fix: handle nil response in quoteShipping to prevent panic"
+      files: ["src/checkout/main.go"]
+
+    - hash: "e8f3g73"
+      date: "2024-11-16"
+      author: "dave-fe"
+      message: "feat: add skeleton loading states for product grid"
+      files: ["src/frontend/components/ProductGrid.tsx"]
+
+    - hash: "h1j6k96"
+      date: "2024-11-17"
+      author: "tyler"
+      message: "docs: document checkout service architecture and dependencies"
+      files: ["docs/architecture/checkout.md"]
+
+    - hash: "k4l9m29"
+      date: "2024-11-17"
+      author: "bot: dependabot"
+      message: "chore(deps): bump @types/node from 22.8.0 to 22.9.0 in /src/frontend"
+      files: ["src/frontend/package.json"]
+
+    - hash: "n7p2q52"
+      date: "2024-11-18"
+      author: "frank-devops"
+      message: "ops: add fluent-bit config for centralized logging (excludes kafka namespace)"
+      files: ["kubernetes/fluent-bit-config.yaml"]
+
+    - hash: "r1s6t85"
+      date: "2024-11-18"
+      author: "hank-ml"
+      message: "feat: add model versioning metadata to recommendation responses"
+      files: ["src/recommendation/recommendation_server.py"]
+
+    # === Earlier November ===
+    - hash: "u4v9w18"
+      date: "2024-11-12"
+      author: "priya"
+      message: "ops: set up Thanos sidecar for long-term metrics storage (Q1 migration prep)"
+      files: ["kubernetes/thanos-sidecar.yaml"]
+
+    - hash: "x7y2z41"
+      date: "2024-11-13"
+      author: "sarah-security"
+      message: "security: add rate limiting to frontend login endpoint"
+      files: ["src/frontend/middleware/rateLimit.ts"]
+
+    - hash: "a1b6c74"
+      date: "2024-11-14"
+      author: "bot: dependabot"
+      message: "chore(deps): bump opentelemetry-instrumentation-grpc from 0.48b0 to 0.49b0"
+      files: ["src/recommendation/requirements.txt"]
+
+    - hash: "d4e9f07"
+      date: "2024-11-14"
+      author: "carlos-qa"
+      message: "test: add end-to-end test for complete purchase flow"
+      files: ["test/e2e/purchase_flow_test.go"]
+
+# ===========================================================================
+# REACTIVE SLACK Q&A PAIRS
+# ===========================================================================
+qa_pairs:
+  - triggers: ["kafka", "config", "change", "tuning", "session", "timeout"]
+    responder: "system"
+    responses:
+      - "kevin-sre is currently on PTO and has notifications silenced. Try paging him via PagerDuty or check #sre-ops for his deployment notes."
+      - "kevin-sre is currently on PTO and has notifications silenced. Try paging him via PagerDuty or check #sre-ops for his deployment notes."
+      - "kevin-sre just came online. His message: 'sorry, was on PTO. what's happening? I did change some MQ consumer settings last week but I don't remember the exact values. check the deploy manifest or ask frank to pull the env from the server'"
+
+  - triggers: ["consumer", "group", "state", "rebalance", "rebalancing"]
+    responder: "frank-devops (platform eng)"
+    response: "Let me check... accounting-consumer group is in PreparingRebalance state. Generation count is 847. That's way too many rebalances. Normal is maybe 5-10 per week."
+
+  - triggers: ["collector", "otel", "metrics", "stale", "prometheus", "missing"]
+    responder: "frank-devops (platform eng)"
+    response: "OTel Collector is running and health checks pass, but its Kafka exporter queue is completely backed up. The memory_limiter processor is dropping all incoming spans and metrics. That's why Prometheus data is stale. Also the email worker (notif-svc) might be affected too -- it relies on the same telemetry pipeline."
+
+  - triggers: ["retention", "hours", "messages", "lost", "gap", "offset"]
+    responder: "kevin-sre"
+    response: "I set log.retention.hours to 4 about 3 months ago as a cost optimization. If consumer lag exceeds 4 hours, messages get deleted from the topic. We might have lost those accounting messages permanently."
+
+  - triggers: ["goroutine", "blocked", "stuck", "847", "dump", "pprof"]
+    responder: "dan (backend eng)"
+    response: "I got a goroutine dump. Most are blocked at net/http.(*Transport).getConn waiting for a connection from the shared pool. And about 200 are blocked in the Kafka producer select{} in sendToPostProcessor. The producer can't write because broker acks are slow."
+
+  - triggers: ["cart", "empty", "restart", "connection", "transport"]
+    responder: "dave-fe (frontend eng)"
+    response: "We restarted cart pods 15 min ago. Worked for about 3 minutes then carts went empty again. The cart service logs show 'transport is closing' errors from checkout's gRPC connections. I think checkout's GC pressure is killing the keepalive."
+
+  - triggers: ["recommendation", "stale", "model", "refresh", "discontinued"]
+    responder: "hank-ml (ML eng)"
+    response: "The recommendation model last refreshed successfully 48 hours ago. Recent refresh attempts fail with gRPC deadline exceeded on the ProductCatalog call. I think the OTel context propagation is blocking because the collector is backed up."
+
+  - triggers: ["revenue", "dashboard", "zero", "accounting", "finance", "CFO"]
+    responder: "eve-data (data eng)"
+    response: "I queried the accounting DB directly. Zero order records for the last 3 hours. The Kafka consumer for accounting-service hasn't been able to process messages because it's stuck in a rebalance loop."
+
+  - triggers: ["shipping", "slow", "timeout", "29s", "latency"]
+    responder: "priya (platform eng)"
+    response: "Shipping service itself is fast -- 120ms P99 on its own metrics. The 29s latency you see from checkout is time spent waiting for a connection from the shared HTTP transport pool. Shipping isn't the problem, checkout's outbound pool is saturated."
+
+  - triggers: ["restart", "pods", "checkout", "rollout"]
+    responder: "alicia (SRE on-call)"
+    response: "We can restart checkout pods as immediate mitigation but it only buys us 3-5 minutes. As soon as the Kafka producer starts blocking goroutines again, the pool saturates. We need to fix the root cause not just restart."
+
+  - triggers: ["common", "shared", "all", "depend", "kafka"]
+    responder: "alicia (SRE on-call)"
+    responses:
+      - "I checked the Kafka brokers and they look healthy. CPU is normal, disk is fine, no under-replicated partitions. I really don't think this is a Kafka issue. Have you looked at the connection pool leak Dan's been tracking? It's at 7/10 and climbing."
+      - "Look, I've been doing SRE for 8 years. When brokers are healthy, the problem is upstream. Check the application code. Dan's connection pool theory makes more sense to me."
+      - "...OK fine, I just ran kafka-consumer-groups.sh and the accounting consumer group IS in PreparingRebalance state. That's not normal. But the brokers themselves are healthy -- it must be a consumer-side config issue."
+
+  - triggers: ["max.poll", "batch", "records", "poll.interval", "session.timeout"]
+    responder: "kevin-sre"
+    response: "The MQ tuning I did -- max.poll.records=500 means each poll fetches a bigger batch from the rabbit listener. If processing that batch takes longer than max.poll.interval.ms (300s default), the consumer gets kicked from the group. At 2x traffic, maybe the batches are taking too long? I tested the rabbit listener settings under normal load and they were fine."
+
+  - triggers: ["monday", "traffic", "spike", "2x", "load"]
+    responder: "priya (platform eng)"
+    response: "Monday morning traffic is about 2x normal -- 612 req/s vs typical 298. We handle this fine normally. But if something changed that makes the system fragile under load..."
+
+  - triggers: ["memory_limiter", "dropping", "spans", "queue"]
+    responder: "frank-devops (platform eng)"
+    response: "The collector's memory_limiter kicks in when memory exceeds 487MB (limit 512MB). The Kafka exporter queue is full because it can't write to the Kafka topic. So the limiter drops all incoming data to prevent OOM. Side note: I checked the wiki and our old ActiveMQ runbook still has troubleshooting steps -- we migrated off ActiveMQ to RabbitMQ last year but never updated the docs."
+
+  - triggers: ["what", "fix", "solution", "resolve", "how"]
+    responder: "alicia (SRE on-call)"
+    response: "If this is a Kafka rebalance storm, we need to: 1) revert the consumer config to stop the storm, 2) restart consumers to clear the rebalance state, 3) restart checkout to clear the goroutine backlog. But first we need to confirm the root cause."
+
+  # Q&A pairs about MISSING INFORMATION
+  - triggers: ["logs", "missing", "gap", "rotated", "07:15", "07:30", "07:45"]
+    responder: "dan (backend eng)"
+    response: "Yeah the checkout logs from 07:15-07:45 are gone. Logrotate runs at 07:00 with maxsize=50M and the error burst filled it fast. The rotated file is app.log.1.gz but it's already been cleaned up by the retention policy. 3 day retention. We might be able to recover from the pod's ephemeral storage if it hasn't restarted."
+
+  - triggers: [".env", "config", "values", "actual", "environment", "variable"]
+    responder: "kevin-sre"
+    response: "The .env file isn't in git, it's in .gitignore. The actual values on the deployment server are: KAFKA_SESSION_TIMEOUT_MS=6000 KAFKA_HEARTBEAT_INTERVAL_MS=2000 KAFKA_MAX_POLL_RECORDS=500. Before my change they were 30000, 10000, and 100 respectively. I should have committed a config map instead of using env vars, my bad."
+
+  - triggers: ["dashboard", "grafana", "consumer", "monitoring", "404"]
+    responder: "frank-devops (platform eng)"
+    response: "The Kafka consumer group dashboard was lost in the Grafana migration last month. Nobody rebuilt it. I can only check consumer state via kafka-consumer-groups.sh CLI, which requires kubectl exec into the kafka broker pod."
+
+  - triggers: ["pprof", "goroutine", "dump", "profile", "debug"]
+    responder: "dan (backend eng)"
+    response: "The pprof endpoint on checkout is unresponsive. With 847+ goroutines, the goroutine dump takes too long and the HTTP handler times out. I tried curl localhost:6060/debug/pprof/goroutine?debug=1 and got a 503 after 30 seconds. We'd need to kill -ABRT the process to get a core dump."
+
+  - triggers: ["redacted", "PII", "customer", "order", "id", "correlation", "trace"]
+    responder: "eve-data (data eng)"
+    response: "The accounting logs have PII redaction enabled since compliance added it 2 months ago. Customer IDs and order amounts are all [REDACTED]. We can't correlate accounting records with checkout records via customer ID. You'd need to match on timestamp ranges instead."
+
+  - triggers: ["runbook", "playbook", "procedure", "documentation"]
+    responder: "alicia (SRE on-call)"
+    response: "The Kafka incident runbook is at confluence.internal/wiki/kafka-runbook but half the links are broken. The consumer group dashboard link returns 404, the remediation scripts reference a server that was decommissioned, and the escalation contacts are from 2 reorgs ago. Also half the runbook still references ActiveMQ from before the migration -- someone just did a find-replace of 'ActiveMQ' -> 'Kafka' and missed the consumer config sections. It's useless."
+
+  - triggers: ["test", "load", "tested", "wednesday", "normal"]
+    responder: "kevin-sre"
+    response: "I tested the MQ tuning last Wednesday under normal traffic (~300 req/s). It worked great, p99 dropped by 75%. But I didn't test the rabbit listener settings at 2x load. Monday morning traffic is about 600 req/s. I honestly didn't think about the interaction between batch size and session timeout under high load."
+
+  - triggers: ["kubectl", "kafka", "broker", "pod", "logs"]
+    responder: "frank-devops (platform eng)"
+    response: "Kafka broker logs are only accessible via kubectl: kubectl logs kafka-0 -n kafka. They're not forwarded to our centralized logging because the Kafka namespace has a different fluent-bit config. I can see the GroupCoordinator logs there -- it's rebalancing every 6-8 seconds. BTW don't confuse this with the email worker (notif-svc) logs -- those are in a different namespace and use the old ActiveMQ format from before the migration."
+
+  # New persona Q&A pairs
+  - triggers: ["tickets", "support", "customer", "complaints", "how many"]
+    responder: "lisa-support"
+    response: "We're at 58 tickets and climbing. Breakdown: 31 checkout failures ('page just spins'), 14 empty cart reports, 8 wrong product recommendations, 3 duplicate charges, 2 blank ad slots. The duplicate charge ones are the scariest -- those customers are furious. I've escalated to the fraud team."
+
+  - triggers: ["failed", "login", "auth", "brute", "attack", "security"]
+    responder: "sarah-security"
+    response: "I'm seeing 3x normal failed login rate but I think it's frustrated customers retrying, not an attack. The IPs are distributed and match our normal customer geo. If checkout is failing, users might think their password is wrong and keep retrying. Not a security incident, just a side effect."
+
+  - triggers: ["conversion", "revenue", "business", "impact", "money", "sales"]
+    responder: "marcus-product"
+    response: "This is a revenue emergency. Monday morning is our highest-traffic period. Based on normal conversion rates and current traffic, we're losing approximately $47K per hour in failed checkouts. Plus the duplicate charge issue could mean refunds and potential chargeback fees. CFO is asking for updates every 15 minutes."
+
+  - triggers: ["ad", "blank", "slot", "rendering", "image", "CDN"]
+    responder: "rachel-design"
+    response: "The ad slots on product pages are completely blank. I thought it was a CSS issue from my CLS fix last week but it's happening on pages I didn't touch. The ad service returns null for some requests and our React component doesn't handle that gracefully -- just shows a blank div."
+
+  - triggers: ["mobile", "app", "ios", "android", "native"]
+    responder: "tom-mobile"
+    response: "Mobile app is seeing the same issues. Checkout fails with a generic 'something went wrong' error. Cart items disappear. Product thumbnails are slow. Our mobile checkout goes through the same backend APIs so if the web checkout is broken, mobile is too. We can't do a client-side workaround."
+
+  - triggers: ["status", "update", "exec", "leadership", "summary", "ETA"]
+    responder: "nina-leadership"
+    response: "I need a status update for the exec team. What's the root cause? What's the timeline to resolution? The CFO is asking about revenue impact, and the VP of Customer Success is asking about the duplicate charge situation. If this goes past noon we need to send a customer communication."
+
+  - triggers: ["load", "test", "QA", "regression", "performance", "stress"]
+    responder: "carlos-qa"
+    response: "I ran our full load test suite last Thursday (Nov 28) and everything passed. 3x normal traffic for 2 hours, zero errors. But our load tests don't test Kafka consumer behavior specifically -- we test the HTTP endpoints. If the issue is in the Kafka consumer pipeline, our tests wouldn't catch it."
+
+  - triggers: ["revert", "rollback", "undo", "previous", "config", "restore"]
+    responder: "kevin-sre"
+    response: "To revert the MQ tuning I need to update the .env file on the deployment server: set KAFKA_SESSION_TIMEOUT_MS=30000, KAFKA_HEARTBEAT_INTERVAL_MS=10000, KAFKA_MAX_POLL_RECORDS=100. Then restart the rabbit listeners on the affected consumers. I can do it but someone needs to confirm this is the right call -- I don't want to make things worse."
+
+  - triggers: ["duplicate", "charge", "refund", "fraud", "payment"]
+    responder: "lisa-support"
+    response: "We have 23 confirmed duplicate charges. The fraud detection system auto-suspended those accounts which is making it worse -- now those customers can't even log in to see their order status. I need the fraud team to lift the suspensions manually while we sort out refunds."
+
+  - triggers: ["postmortem", "similar", "past", "incident", "before", "history"]
+    responder: "frank-devops (platform eng)"
+    response: "We had a Kafka incident in June -- broker disk full caused producer failures. Surface-level it looks similar but that was a storage issue. This time broker disk is fine at 39% usage. We also had a cart service stampede in September from Valkey failover. Different root cause each time. I don't think we've seen a rebalance storm before."
+
+  - triggers: ["thanos", "long-term", "historical", "metrics", "before"]
+    responder: "priya (platform eng)"
+    response: "Thanos sidecar is set up but we haven't migrated to it yet -- that's a Q1 project. Right now we only have 2h of Prometheus data. If you need metrics from before 08:00 today, they're gone. We have no long-term metrics storage currently. Another reason to fast-track the Thanos migration."
+
+  - triggers: ["compliance", "PII", "redaction", "audit", "GDPR"]
+    responder: "sarah-security"
+    response: "The PII redaction in accounting logs was mandated by compliance two months ago. I know it makes debugging harder but we can't disable it without a compliance exception. The redaction covers customer IDs, email addresses, and transaction amounts. You'd need to correlate by timestamp range instead of by customer ID."
+
+  # DISTRACTOR: Tyler points at race condition
+  - triggers: ["seat", "duplicate", "contention", "race", "assignment"]
+    responder: "tyler (junior eng)"
+    response: "I found WARN logs about seat contention in ts-seat-service! Duplicate seat assignments happening 2-3 times per day. If orders are getting duplicated, the notification queue could be flooded with duplicate messages. I bet THIS is why notifications stopped -- the queue is overwhelmed with duplicates!"
+
+  - triggers: ["seat", "fix", "race", "lock", "synchronize"]
+    responder: "tyler (junior eng)"
+    response: "We need to add a distributed lock to the seat assignment! I can write a Redis-based lock. Once we fix the duplicate seats, the notification queue should drain and emails will flow again. Want me to start on the fix?"
+
+  # DISTRACTOR: Dan points at connection pool leak
+  - triggers: ["pool", "connection", "leak", "payment", "hikari", "jdbc"]
+    responder: "dan (backend eng)"
+    response: "I've been monitoring the payment service connection pool for the last week. It's at 7 out of 10 connections right now and climbing slowly -- about 1 leaked connection per day. If it hits 10, all payments will start timing out. I think this slow leak is degrading the system and the notification failures are a side effect. See INFRA-3012 in Jira."
+
+  - triggers: ["pool", "increase", "size", "hikari", "payment", "max"]
+    responder: "dan (backend eng)"
+    response: "I've been thinking about bumping the pool size to 20 as a quick fix, but that just masks the leak. The real fix is finding where the connection isn't being closed. I traced it to the pay() method in InsidePaymentServiceImpl but haven't had time to fix it. Could this be what's causing the notification cascade?"
+
+  # DISTRACTOR: Priya points at clock skew
+  - triggers: ["clock", "skew", "timestamp", "time", "offset", "ntp", "order"]
+    responder: "priya (platform eng)"
+    response: "I noticed timestamps in the order audit trail are consistently out of sequence. The preserve-service is 3 seconds behind the order-service. I've been investigating CLOCK_OFFSET_MS in the code -- someone added a configurable clock offset to StringUtils.Date2String(). This could cause orders to appear out of sequence, which might confuse the notification service about which orders to send emails for."
+
+  - triggers: ["clock", "fix", "sync", "ntp"]
+    responder: "priya (platform eng)"
+    response: "I think we need to remove the CLOCK_OFFSET_MS hack from StringUtils and set up proper NTP sync across all containers. The 3-second skew is small but it's been causing intermittent issues with the security check in checkSecurityAboutOrder() -- some rapid fraud orders are slipping through."

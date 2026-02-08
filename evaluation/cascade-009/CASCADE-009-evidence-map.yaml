@@ -1,0 +1,987 @@
+# CASCADE-009 Evidence Map for OpenTelemetry Demo (HARDENED v3)
+# Difficulty target: <20% pass rate on Opus
+#
+# Cognitive bias exploitation (based on research):
+#
+# 1. ANCHORING: First signals all point at shipping service. Sentry stacktrace
+#    says "quoteShipping", metric shows shipping latency at 29s, Dan's first
+#    message says "shipping quotes timing out." Agent anchors on shipping.
+#
+# 2. CONFIRMATION BIAS: Evidence CONFIRMS the shipping hypothesis:
+#    - shipping_service_request_rate dropped from 48 to 3 (looks broken)
+#    - checkout_to_shipping_p99 is 29s (looks like shipping is slow)
+#    - But both are symptoms of connection pool starvation, not shipping bugs
+#
+# 3. EXPERT AUTHORITY: Alicia (senior SRE) explicitly dismisses James's flag
+#    change as irrelevant: "this is a checkout infra issue not address-related"
+#    Research shows LLMs "cannot be corrected" once anchored by expert opinion.
+#
+# 4. FALSE TEMPORAL CORRELATION: dependabot PR for protobuf bump opened at
+#    06:30 (2h before incident). Tyler builds a plausible theory around it.
+#    A shipping service config change yesterday adds another false correlation.
+#
+# 5. SATISFICING TRAP: The goroutine count (847) is the ONLY correct signal
+#    visible in current metrics. But Tyler attributes it to Kafka producer
+#    goroutine leak (plausible, wrong). Agent may "fix" by restarting pods
+#    (works temporarily) without finding root cause.
+#
+# 6. INFORMATION OVERLOAD: Tyler sends 15+ messages investigating 10 wrong
+#    hypotheses. Each is plausible. Agent must filter signal from noise.
+#
+# 7. SIGNAL BURIAL: James's flag change message is in #platform-general
+#    surrounded by 16 bot messages. He calls it "housekeeping on q4 migration
+#    configs" -- no mention of "address validation" or the flag name.
+
+id: CASCADE-009-otel
+name: "Feature flag cache TTL -> checkout cascade"
+codebase: "opentelemetry-demo"
+
+task_prompt: |
+  INCIDENT: Checkout is unresponsive
+
+  Starting approximately 2 hours ago, customers report that checkout
+  "just spins forever." The page loads, they click Place Order, and
+  nothing happens for 30+ seconds before timing out.
+
+  Checkout success rate has dropped from 99.2% to ~15%.
+
+  No deployments today. No infrastructure alerts firing.
+  The on-call engineer says "all services are green on the dashboard."
+
+  Investigate and resolve.
+
+# ===========================================================================
+# SLACK MCP SERVER
+# ===========================================================================
+slack:
+  channels:
+    - name: "#incidents"
+      messages:
+        - user: "alicia (SRE on-call)"
+          timestamp: "2024-11-28T09:17:00Z"
+          text: "Getting paged on checkout. P99 latency spiked to 30s. Looking into it."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-11-28T09:18:00Z"
+          text: "Oh no! I saw this once before, it was a DNS issue. Let me check DNS resolution times."
+
+        - user: "dan (backend eng)"
+          timestamp: "2024-11-28T09:19:00Z"
+          text: "I see the same thing. Shipping quotes are timing out. Could the shipping service be overloaded?"
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-11-28T09:20:00Z"
+          text: "DNS looks fine actually. Resolving in <1ms. Maybe it's the TLS certs? I heard we're doing cert rotation soon."
+
+        - user: "alicia (SRE on-call)"
+          timestamp: "2024-11-28T09:22:00Z"
+          text: "Shipping service looks healthy. CPU 12%, memory 40%, no errors in its logs. Problem is upstream."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-11-28T09:23:00Z"
+          text: "I just checked - all TLS certs are valid. Not expired. Ruled that out! Maybe it's the database? Postgres connection pool?"
+
+        - user: "priya (platform eng)"
+          timestamp: "2024-11-28T09:25:00Z"
+          text: "We've seen this when the load generator floods the frontend. @dan can you check if loadGeneratorFloodHomepage flag is on?"
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-11-28T09:26:00Z"
+          text: "I checked Postgres - connections look normal, 12 active out of 100 max. Not a DB issue. What about Redis? Could Valkey be full?"
+
+        - user: "dan (backend eng)"
+          timestamp: "2024-11-28T09:27:00Z"
+          text: "Load generator flag is off. Frontend traffic looks normal."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-11-28T09:28:00Z"
+          text: "Valkey memory usage is 23%. Plenty of room. I'm going to restart the checkout pods, that usually fixes things."
+
+        - user: "alicia (SRE on-call)"
+          timestamp: "2024-11-28T09:29:00Z"
+          text: "@tyler please don't restart anything yet. We need to understand what's happening first."
+
+        - user: "marcus (product eng)"
+          timestamp: "2024-11-28T09:30:00Z"
+          text: "My checkout just hung for 30 seconds then failed. Tried again and same thing. This is affecting real users."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-11-28T09:31:00Z"
+          text: "Ok ok not restarting. But I looked at the deployment history and the last deploy was yesterday at 4pm (config refresh, no code changes). So it's not a deploy issue. Also checked - no cronjobs running, no migrations."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-11-28T09:33:00Z"
+          text: "Could it be a memory leak? I read that Go can leak goroutines if channels aren't closed properly. Let me check goroutine profiling."
+
+        - user: "alicia (SRE on-call)"
+          timestamp: "2024-11-28T09:35:00Z"
+          text: "Confirmed: checkout success rate at 15%. All other services responding normally. This is specific to the checkout flow."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-11-28T09:36:00Z"
+          text: "Whoa, I looked at goroutine count and it's at 847! Normal is like 50. Definitely a goroutine leak. We need to add pprof and get a goroutine dump!"
+
+        - user: "dan (backend eng)"
+          timestamp: "2024-11-28T09:38:00Z"
+          text: "Lots of timeout errors in checkout logs but nothing about WHY. All 'context deadline exceeded' which just means the request took too long."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-11-28T09:39:00Z"
+          text: "I bet it's the Kafka producer. We had kafkaQueueProblems last month and it caused goroutine buildup. The producer select statement can leak goroutines if the context is cancelled."
+
+        - user: "priya (platform eng)"
+          timestamp: "2024-11-28T09:42:00Z"
+          text: "Could be Kafka. Let me check the queue."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-11-28T09:43:00Z"
+          text: "I'm looking at the Kafka producer code in checkout/kafka/producer.go. The select in sendToPostProcessor looks suspicious. If Successes channel blocks, the goroutine leaks."
+
+        - user: "priya (platform eng)"
+          timestamp: "2024-11-28T09:45:00Z"
+          text: "Kafka is fine. Consumer lag is 3, messages flowing. Not Kafka."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-11-28T09:46:00Z"
+          text: "Hmm ok not Kafka. What about the payment service? If chargeCard hangs, all the downstream stuff would time out too. Let me check paymentUnreachable flag."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-11-28T09:47:00Z"
+          text: "paymentUnreachable flag is off. Payment service is responding in 50ms. Not payment."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-11-28T09:49:00Z"
+          text: "WAIT. I just noticed something. There was a dependabot PR this morning bumping protobuf from 5.29.3 to 5.29.4 in product-reviews. What if the protobuf upgrade caused a serialization incompatibility? Checkout talks to product-catalog via gRPC/protobuf!"
+
+        - user: "alicia (SRE on-call)"
+          timestamp: "2024-11-28T09:50:00Z"
+          text: "So we've ruled out: shipping, kafka, payment, load generator, DNS, TLS, database, valkey, memory. The goroutine count is the only anomaly. @tyler the protobuf bump hasn't been merged yet, it's just a PR."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-11-28T09:51:00Z"
+          text: "Oh right, it's just a PR. But still -- did anyone touch the gRPC protos recently? I see dan merged a protobuf version bump for product-reviews yesterday."
+
+        - user: "dan (backend eng)"
+          timestamp: "2024-11-28T09:52:00Z"
+          text: "That was product-reviews only. Checkout doesn't import from product-reviews directly. Different proto packages."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-11-28T09:53:00Z"
+          text: "Hmm ok. But checkout-to-shipping is HTTP not gRPC. What if the shipping service changed their response format? I see the shipping request rate is basically zero. Checkout can't reach shipping at all."
+
+        - user: "alicia (SRE on-call)"
+          timestamp: "2024-11-28T09:54:00Z"
+          text: "Shipping is healthy though. This is confusing. If shipping works fine and checkout can't reach it, the problem is somewhere in between."
+
+        - user: "dan (backend eng)"
+          timestamp: "2024-11-28T09:55:00Z"
+          text: "Memory fine. 340MB out of 512MB. No OOM kills. No restarts. Goroutine count has been 847 for over an hour. They're stuck somewhere."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-11-28T09:56:00Z"
+          text: "I know what it is! The checkout-to-shipping latency metric shows 29 seconds. That's almost exactly the timeout. Shipping IS slow! Maybe it's the Rust actix runtime? Did the shipping service get a bad deploy?"
+
+        - user: "priya (platform eng)"
+          timestamp: "2024-11-28T09:57:00Z"
+          text: "Shipping hasn't been deployed in 5 days. And its own latency metric shows 120ms. The 29s is what checkout observes, not what shipping takes."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-11-28T09:58:00Z"
+          text: "OK so checkout sees 29s but shipping takes 120ms. 29 seconds is unaccounted for. Where's the time going? Network? I'm going to run a traceroute from checkout to shipping."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-11-28T10:00:00Z"
+          text: "Traceroute: checkout to shipping is 0.3ms. Network is fine. So 29s latency, 0.3ms network, 120ms shipping response... 28.88 seconds just sitting there doing nothing? That makes no sense."
+
+        - user: "alicia (SRE on-call)"
+          timestamp: "2024-11-28T10:02:00Z"
+          text: "847 goroutines stuck for over an hour. 29 seconds of unexplained wait time per request. Something is blocking the HTTP call before it even reaches shipping. But what?"
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-11-28T10:03:00Z"
+          text: "What if the OTel collector is slow? All our HTTP calls go through otelhttp instrumentation. If the collector can't keep up with spans, maybe the instrumentation blocks?"
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-11-28T10:05:00Z"
+          text: "Collector looks fine. Queue depth 12, well under limit. Span export latency 3ms. Not the collector."
+
+        - user: "dan (backend eng)"
+          timestamp: "2024-11-28T10:06:00Z"
+          text: "Interesting that the Sentry stacktrace shows goroutines blocked at Transport.getConn. That's the Go HTTP transport waiting to get a connection from the pool. Is the pool undersized? @priya you recently consolidated the transports right?"
+
+        - user: "priya (platform eng)"
+          timestamp: "2024-11-28T10:08:00Z"
+          text: "Yeah I consolidated all outbound calls to use one shared transport last week. MaxConnsPerHost=20 which should be plenty. We only have like 3 outbound hosts."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-11-28T10:09:00Z"
+          text: "Maybe increase the pool size? If 20 isn't enough we could try 100."
+
+        - user: "alicia (SRE on-call)"
+          timestamp: "2024-11-28T10:10:00Z"
+          text: "20 connections should be more than enough for 3 downstream hosts. Something is holding all 20. I wonder if there's a slow consumer we're not seeing."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-11-28T10:12:00Z"
+          text: "Could it be a Go runtime bug? We're on Go 1.24.2. There was a known issue with HTTP transport connection reuse in 1.22."
+
+        - user: "dan (backend eng)"
+          timestamp: "2024-11-28T10:13:00Z"
+          text: "That was fixed in 1.22.4. We're on 1.24.2."
+
+    # NO #address-validation channel -- that was too easy to find
+    # James's flag change info is buried in #platform-general below
+
+    - name: "#platform-general"
+      messages:
+        - user: "bot: ci-notify"
+          timestamp: "2024-11-27T14:22:00Z"
+          text: "Build passed: product-catalog-service #847 (main)"
+
+        - user: "bot: deploy-notify"
+          timestamp: "2024-11-27T16:42:00Z"
+          text: "Deploy complete: checkout-service v2.8.1 -> v2.8.1 (no changes, config refresh)"
+
+        - user: "priya (platform eng)"
+          timestamp: "2024-11-27T17:00:00Z"
+          text: "FYI the config refresh deploy was just to pick up new env vars for the staging environment. No production impact."
+
+        - user: "bot: ci-notify"
+          timestamp: "2024-11-28T06:15:00Z"
+          text: "Build passed: recommendation-service #291 (main)"
+
+        - user: "bot: dependabot"
+          timestamp: "2024-11-28T06:30:00Z"
+          text: "PR #1247: Bump golang.org/x/net from 0.46.0 to 0.47.0 in /src/checkout"
+
+        - user: "james (address team)"
+          timestamp: "2024-11-28T07:11:00Z"
+          text: "doing some housekeeping on the q4 migration configs today, just routine stuff"
+
+        - user: "bot: flagd"
+          timestamp: "2024-11-28T07:13:00Z"
+          text: "Flag change: q4-provider-migration defaultVariant changed from legacy to current"
+
+        - user: "james (address team)"
+          timestamp: "2024-11-28T07:16:00Z"
+          text: "all good, migration configs updated. monitoring looks clean"
+
+        - user: "bot: ci-notify"
+          timestamp: "2024-11-28T07:30:00Z"
+          text: "Build passed: ad-service #562 (main)"
+
+        - user: "sarah (address team)"
+          timestamp: "2024-11-28T07:35:00Z"
+          text: "nice, thx james"
+
+        - user: "bot: dependabot"
+          timestamp: "2024-11-28T07:45:00Z"
+          text: "PR #1248: Bump protobuf from 5.29.3 to 5.29.4 in /src/product-reviews"
+
+        - user: "bot: ci-notify"
+          timestamp: "2024-11-28T08:00:00Z"
+          text: "Build passed: email-service #193 (main)"
+
+        - user: "priya (platform eng)"
+          timestamp: "2024-11-28T08:15:00Z"
+          text: "Reminder: quarterly cert rotation next week. Nothing today."
+
+        - user: "bot: ci-notify"
+          timestamp: "2024-11-28T08:30:00Z"
+          text: "Build passed: frontend #1084 (main)"
+
+        - user: "bot: grafana-alert"
+          timestamp: "2024-11-28T08:45:00Z"
+          text: "[RESOLVED] Alert: product-catalog P99 latency > 500ms (was transient spike from cache rebuild)"
+
+        - user: "bot: ci-notify"
+          timestamp: "2024-11-28T09:00:00Z"
+          text: "Build passed: cart-service #347 (main)"
+
+    - name: "#backend-eng"
+      messages:
+        - user: "dan (backend eng)"
+          timestamp: "2024-11-27T15:30:00Z"
+          text: "Merged the protobuf version bump for product reviews. Should be backwards compatible."
+
+        - user: "priya (platform eng)"
+          timestamp: "2024-11-27T16:00:00Z"
+          text: "Anyone know if we still need the legacy quote endpoint on shipping? I saw it in the code but not sure if anything calls it."
+
+        - user: "dan (backend eng)"
+          timestamp: "2024-11-27T16:10:00Z"
+          text: "I think it's still used by the mobile app. Don't remove it yet."
+
+        - user: "priya (platform eng)"
+          timestamp: "2024-11-27T16:30:00Z"
+          text: "Also FYI I updated the shipping service's Actix worker thread count from 4 to 8 yesterday as part of the capacity plan. Deployed at 16:42."
+
+        - user: "dan (backend eng)"
+          timestamp: "2024-11-27T16:35:00Z"
+          text: "That shouldn't affect anything negatively. More workers = more throughput."
+
+        - user: "marcus (product eng)"
+          timestamp: "2024-11-28T08:00:00Z"
+          text: "Quick question - does anyone know why checkout calls 7 services sequentially instead of parallelizing some of them? Seems slow by design."
+
+        - user: "dan (backend eng)"
+          timestamp: "2024-11-28T08:05:00Z"
+          text: "Historical reasons. There's a dependency chain: need cart before product prices, need prices before shipping quote, need shipping before payment. Some could be parallelized but it's not been a priority."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2024-11-28T08:30:00Z"
+          text: "I was looking at the checkout code and noticed something - the HTTP transport was recently consolidated (priya's commit a8f3c21). Is there a risk of one slow call blocking all the others?"
+
+        - user: "priya (platform eng)"
+          timestamp: "2024-11-28T08:35:00Z"
+          text: "No, HTTP connections are per-host. A slow call to shipping doesn't affect calls to email. The transport just reuses TCP connections. Standard Go best practice."
+
+    - name: "#support"
+      messages:
+        - user: "lisa (support)"
+          timestamp: "2024-11-28T09:20:00Z"
+          text: "Getting flooded with checkout complaints. Customers say 'page just spins'. Anyone aware of an issue?"
+
+        - user: "lisa (support)"
+          timestamp: "2024-11-28T09:35:00Z"
+          text: "12 more tickets in the last 15 minutes. All checkout-related."
+
+        - user: "lisa (support)"
+          timestamp: "2024-11-28T09:50:00Z"
+          text: "Now at 47 tickets total. Some customers saying they were charged but order didn't complete (payment goes through before shipping step)."
+
+# ===========================================================================
+# SENTRY MCP SERVER
+# ===========================================================================
+sentry:
+  projects:
+    - name: "checkout-service"
+      issues:
+        - id: "CHKOUT-4827"
+          title: "TimeoutError: context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
+          count: 2847
+          first_seen: "2024-11-28T07:45:00Z"
+          last_seen: "2024-11-28T10:05:00Z"
+          level: "error"
+          tags:
+            environment: "production"
+            service: "checkout"
+            runtime: "go1.24.2"
+          stacktrace: |
+            goroutine 847 [select, 47 minutes]:
+            net/http.(*Transport).getConn(0xc0004e2000, {0x0, 0x0}, ...)
+                /usr/local/go/src/net/http/transport.go:1363 +0x5e5
+            net/http.(*Transport).roundTrip(0xc0004e2000, 0xc000542800)
+                /usr/local/go/src/net/http/transport.go:607 +0x315
+            go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp.(*Transport).RoundTrip(...)
+                /go/pkg/mod/go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp@v0.64.0/transport.go:93
+            net/http.send(0xc000542800, {0x184b3e0, 0xc0004e2200}, ...)
+                /usr/local/go/src/net/http/client.go:259 +0x5b8
+            net/http.(*Client).do(0xc0004e2200, 0xc000542800)
+                /usr/local/go/src/net/http/client.go:724 +0x8cd
+            net/http.(*Client).Do(...)
+                /usr/local/go/src/net/http/client.go:590
+            main.(*checkout).quoteShipping(0xc0001a2000, {0x1849a20, 0xc0005e6000}, ...)
+                /app/main.go:469
+            main.(*checkout).prepareOrderItemsAndShippingQuoteFromCart(...)
+                /app/main.go:420
+            main.(*checkout).PlaceOrder(0xc0001a2000, {0x1849a20, 0xc0005e6000}, ...)
+                /app/main.go:314
+            github.com/open-telemetry/opentelemetry-demo/src/checkout/genproto/oteldemo._CheckoutService_PlaceOrder_Handler(...)
+                /app/genproto/oteldemo/demo_grpc.pb.go:847
+            google.golang.org/grpc.(*Server).processUnaryRPC(...)
+                /go/pkg/mod/google.golang.org/grpc@v1.78.0/server.go:1386
+          breadcrumbs:
+            - timestamp: "2024-11-28T10:05:12Z"
+              message: "HTTP POST http://shipping-service:8080/get-quote"
+              category: "http"
+              data:
+                method: "POST"
+                status_code: null
+                reason: "context deadline exceeded"
+
+        - id: "CHKOUT-4828"
+          title: "context deadline exceeded"
+          count: 1293
+          first_seen: "2024-11-28T07:50:00Z"
+          last_seen: "2024-11-28T10:05:00Z"
+          level: "error"
+          tags:
+            environment: "production"
+            function: "shipOrder"
+
+        - id: "CHKOUT-4829"
+          title: "failed to send order confirmation email"
+          count: 847
+          first_seen: "2024-11-28T08:10:00Z"
+          last_seen: "2024-11-28T10:05:00Z"
+          level: "warning"
+          tags:
+            environment: "production"
+            function: "sendOrderConfirmation"
+
+    - name: "shipping-service"
+      issues: []
+
+    - name: "email-service"
+      issues: []
+
+    - name: "payment-service"
+      issues: []
+
+    - name: "cart-service"
+      issues:
+        - id: "CART-312"
+          title: "GetCart RPC timeout from checkout-service"
+          count: 89
+          first_seen: "2024-11-28T09:30:00Z"
+          level: "warning"
+          tags:
+            caller: "checkout-service"
+
+    - name: "frontend"
+      issues:
+        - id: "FE-1847"
+          title: "PlaceOrder request timeout after 30s"
+          count: 2103
+          first_seen: "2024-11-28T07:45:00Z"
+          level: "error"
+          tags:
+            page: "/checkout"
+
+    # Distractor projects with unrelated issues
+    - name: "product-catalog"
+      issues:
+        - id: "PCAT-923"
+          title: "Transient cache miss on product lookup"
+          count: 12
+          first_seen: "2024-11-28T06:30:00Z"
+          level: "warning"
+          tags:
+            note: "Happens during cache rebuild, self-resolving"
+
+    - name: "recommendation-service"
+      issues:
+        - id: "REC-441"
+          title: "gRPC deadline exceeded calling ProductCatalog"
+          count: 34
+          first_seen: "2024-11-28T09:40:00Z"
+          level: "warning"
+          tags:
+            note: "Secondary effect of checkout congestion"
+
+    - name: "ad-service"
+      issues:
+        - id: "AD-287"
+          title: "High CPU usage during ad generation"
+          count: 5
+          first_seen: "2024-11-27T22:00:00Z"
+          level: "info"
+          tags:
+            note: "Unrelated - normal ad rendering load"
+
+# ===========================================================================
+# PAGERDUTY MCP SERVER
+# ===========================================================================
+pagerduty:
+  incidents:
+    - id: "PD-89247"
+      title: "Checkout success rate below 50%"
+      urgency: "high"
+      status: "triggered"
+      created_at: "2024-11-28T09:15:00Z"
+      service: "checkout-service"
+      alert_source: "prometheus"
+      alert_rule: "checkout_success_rate < 0.5 for 5m"
+      timeline:
+        - timestamp: "2024-11-28T09:15:00Z"
+          action: "Alert triggered"
+          detail: "checkout_success_rate dropped to 0.15"
+        - timestamp: "2024-11-28T09:17:00Z"
+          action: "Acknowledged by alicia"
+        - timestamp: "2024-11-28T09:45:00Z"
+          action: "Escalated to P1"
+          detail: "Revenue impact estimated at $12K/hour"
+
+    # Old resolved incident (noise)
+    - id: "PD-88103"
+      title: "Product catalog P99 > 500ms"
+      urgency: "low"
+      status: "resolved"
+      created_at: "2024-11-28T08:42:00Z"
+      service: "product-catalog"
+      alert_source: "prometheus"
+      timeline:
+        - timestamp: "2024-11-28T08:42:00Z"
+          action: "Alert triggered"
+        - timestamp: "2024-11-28T08:47:00Z"
+          action: "Auto-resolved"
+          detail: "Cache rebuild completed"
+
+# ===========================================================================
+# PROMETHEUS / METRICS MCP SERVER
+# No more "address_validation" in metric names. Agent must discover
+# the connection via code reading, not metric browsing.
+# ===========================================================================
+metrics:
+  queries:
+    # Obvious symptom metrics
+    - query: "checkout_success_rate"
+      result:
+        current: 0.15
+        1h_ago: 0.15
+        24h_ago: 0.994
+        note: "Dropped from 99.4% to 15% approximately 2 hours ago"
+
+    - query: "checkout_latency_p99_seconds"
+      result:
+        current: 30.0
+        1h_ago: 30.0
+        24h_ago: 0.85
+        note: "P99 at 30s (the timeout limit) for 2 hours"
+
+    - query: "checkout_request_total"
+      result:
+        current_rate_per_min: 47
+        24h_ago_rate_per_min: 52
+        note: "Request rate is normal - it's not a traffic spike"
+
+    # Misleading "healthy" metrics
+    - query: "shipping_service_latency_p99_seconds"
+      result:
+        current: 0.12
+        note: "Shipping is fast (when requests reach it)"
+
+    - query: "shipping_service_request_rate"
+      result:
+        current: 3
+        24h_ago: 48
+        note: "Shipping request rate dropped dramatically"
+
+    - query: "payment_service_success_rate"
+      result:
+        current: 0.998
+        note: "Payment service is fine"
+
+    - query: "kafka_consumer_group_lag"
+      result:
+        current: 3
+        note: "Normal"
+
+    - query: "checkout_pod_memory_bytes"
+      result:
+        current: 356000000
+        limit: 536870912
+        note: "66% usage, normal"
+
+    - query: "checkout_pod_cpu_percent"
+      result:
+        current: 8
+        note: "Low CPU"
+
+    - query: "valkey_memory_used_bytes"
+      result:
+        current: 124000000
+        max: 536870912
+        note: "23% usage, plenty of room"
+
+    - query: "postgres_active_connections"
+      result:
+        current: 12
+        max: 100
+        note: "Normal connection count"
+
+    - query: "frontend_request_rate"
+      result:
+        current: 312
+        24h_ago: 298
+        note: "Normal frontend traffic"
+
+    - query: "otel_collector_queue_size"
+      result:
+        current: 12
+        max: 5000
+        note: "Collector processing normally"
+
+    - query: "product_catalog_latency_p99_seconds"
+      result:
+        current: 0.045
+        note: "Normal"
+
+    # CONFIRMATION BIAS TRAP: These metrics CONFIRM "shipping is broken"
+    # hypothesis but are actually symptoms of connection pool starvation
+    - query: "checkout_to_shipping_latency_p99_seconds"
+      result:
+        current: 29.2
+        24h_ago: 0.18
+        note: "Checkout-observed latency to shipping is 29s (shipping itself responds in 120ms)"
+
+    - query: "checkout_to_email_latency_p99_seconds"
+      result:
+        current: 28.7
+        24h_ago: 0.09
+        note: "Email service latency also spiked (same underlying cause)"
+
+    - query: "checkout_outbound_http_errors_total"
+      result:
+        by_host:
+          "shipping-service:8080": 2847
+          "email-service:8080": 847
+          "product-catalog:8080": 0
+        note: "Errors concentrated on HTTP (not gRPC) backends"
+
+    # KEY SIGNALS - but with generic names
+    - query: "go_goroutines{service='checkout-service'}"
+      result:
+        current: 847
+        1h_ago: 842
+        24h_ago: 47
+        note: "Elevated for 2+ hours"
+
+    - query: "go_goroutines{service='shipping-service'}"
+      result:
+        current: 23
+        note: "Normal"
+
+    - query: "go_goroutines{service='product-catalog'}"
+      result:
+        current: 31
+        note: "Normal"
+
+    # Connection pool metrics - generic Go HTTP transport names
+    - query: "net_http_transport_conns_per_host{service='checkout-service'}"
+      result:
+        current: 20
+        note: "At configured maximum"
+
+    - query: "net_http_transport_idle_conns{service='checkout-service'}"
+      result:
+        current: 0
+        note: "No idle connections available"
+
+    - query: "net_http_request_duration_seconds{service='checkout-service',quantile='0.99'}"
+      result:
+        current: 29.8
+        24h_ago: 0.34
+        note: "Requests taking nearly 30s (the timeout)"
+
+    # These metrics exist but DON'T reveal the answer
+    - query: "net_http_requests_total{service='checkout-service'}"
+      result:
+        by_status:
+          "200": 847
+          "504": 2847
+          "0": 1293
+        note: "0 status = connection never established (timed out waiting for conn)"
+
+    - query: "flagd_evaluation_total{service='checkout-service'}"
+      result:
+        current_rate: 0.5
+        note: "Flag evaluations happening normally (cached values being served)"
+
+# ===========================================================================
+# APPLICATION LOGS
+# With massive noise - hundreds of normal entries mixed with signal
+# ===========================================================================
+logs:
+  services:
+    - name: "checkout-service"
+      log_file: "/var/log/checkout/app.log"
+      entries:
+        # Current errors (what agent sees with level=ERROR)
+        - timestamp: "2024-11-28T10:05:47Z"
+          level: "ERROR"
+          message: "failed POST to shipping service: context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
+          function: "quoteShipping"
+
+        - timestamp: "2024-11-28T10:05:42Z"
+          level: "ERROR"
+          message: "shipping quote failure: failed POST to shipping service: context deadline exceeded"
+          function: "prepareOrderItemsAndShippingQuoteFromCart"
+
+        - timestamp: "2024-11-28T10:05:38Z"
+          level: "ERROR"
+          message: "failed POST to shipping service: context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
+          function: "shipOrder"
+
+        - timestamp: "2024-11-28T10:05:33Z"
+          level: "ERROR"
+          message: "failed POST to email service: context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
+          function: "sendOrderConfirmation"
+
+        - timestamp: "2024-11-28T10:05:12Z"
+          level: "ERROR"
+          message: "failed POST to shipping service: context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
+          function: "quoteShipping"
+
+        - timestamp: "2024-11-28T10:04:58Z"
+          level: "ERROR"
+          message: "could not charge the card: rpc error: code = DeadlineExceeded"
+          function: "chargeCard"
+
+        - timestamp: "2024-11-28T10:04:47Z"
+          level: "ERROR"
+          message: "shipping quote failure: failed POST to shipping service: context deadline exceeded"
+          function: "prepareOrderItemsAndShippingQuoteFromCart"
+
+        # Normal INFO noise (what agent sees with no level filter)
+        - timestamp: "2024-11-28T10:05:50Z"
+          level: "INFO"
+          message: "[PlaceOrder] user_id=usr-9f82a3 user_currency=USD"
+          function: "PlaceOrder"
+
+        - timestamp: "2024-11-28T10:05:48Z"
+          level: "INFO"
+          message: "service config: &{productCatalogSvcAddr:product-catalog:8080 cartSvcAddr:cart:8080 ...}"
+          function: "main"
+
+        - timestamp: "2024-11-28T10:05:45Z"
+          level: "INFO"
+          message: "[PlaceOrder] user_id=usr-4b21e7 user_currency=EUR"
+          function: "PlaceOrder"
+
+        - timestamp: "2024-11-28T10:05:40Z"
+          level: "INFO"
+          message: "[PlaceOrder] user_id=usr-8c34f1 user_currency=USD"
+          function: "PlaceOrder"
+
+        - timestamp: "2024-11-28T10:05:35Z"
+          level: "INFO"
+          message: "[PlaceOrder] user_id=usr-2d56a9 user_currency=GBP"
+          function: "PlaceOrder"
+
+        - timestamp: "2024-11-28T10:05:30Z"
+          level: "INFO"
+          message: "payment went through transaction_id=tx-7f4e2a1b"
+          function: "PlaceOrder"
+
+        - timestamp: "2024-11-28T10:05:25Z"
+          level: "INFO"
+          message: "[PlaceOrder] user_id=usr-6e78c3 user_currency=USD"
+          function: "PlaceOrder"
+
+        - timestamp: "2024-11-28T10:05:20Z"
+          level: "INFO"
+          message: "sending to postProcessor"
+          function: "sendToPostProcessor"
+
+        - timestamp: "2024-11-28T10:05:15Z"
+          level: "INFO"
+          message: "Successful to write message. offset: 12847, duration: 3ms"
+          function: "sendToPostProcessor"
+
+        - timestamp: "2024-11-28T10:05:10Z"
+          level: "INFO"
+          message: "[PlaceOrder] user_id=usr-1a93b5 user_currency=JPY"
+          function: "PlaceOrder"
+
+        # HISTORICAL LOGS (from 2+ hours ago) - buried deep
+        # Agent needs to search with since= or grep= to find these
+
+        - timestamp: "2024-11-28T07:14:30Z"
+          level: "INFO"
+          message: "q4-provider-migration flag resolved to: legacy (cached 30m0s)"
+          function: "validateAddress"
+
+        - timestamp: "2024-11-28T07:15:02Z"
+          level: "WARN"
+          message: "POST https://addr-provider.external/v1/validate returned 429: API v1 has been sunset. Please migrate to v2."
+          function: "retryablePost"
+
+        - timestamp: "2024-11-28T07:15:04Z"
+          level: "INFO"
+          message: "retrying request attempt 1/5, backoff 2s"
+          function: "retryablePost"
+
+        - timestamp: "2024-11-28T07:15:06Z"
+          level: "INFO"
+          message: "retrying request attempt 2/5, backoff 4s"
+          function: "retryablePost"
+
+        - timestamp: "2024-11-28T07:15:10Z"
+          level: "INFO"
+          message: "retrying request attempt 3/5, backoff 8s"
+          function: "retryablePost"
+
+        - timestamp: "2024-11-28T07:15:18Z"
+          level: "INFO"
+          message: "retrying request attempt 4/5, backoff 16s"
+          function: "retryablePost"
+
+        - timestamp: "2024-11-28T07:15:34Z"
+          level: "INFO"
+          message: "retrying request attempt 5/5, backoff 32s"
+          function: "retryablePost"
+
+        - timestamp: "2024-11-28T07:16:06Z"
+          level: "WARN"
+          message: "non-critical validation failed: 5 retries exhausted: HTTP 429"
+          function: "validateAddress"
+
+        - timestamp: "2024-11-28T07:44:30Z"
+          level: "INFO"
+          message: "q4-provider-migration flag resolved to: current (cached 30m0s)"
+          function: "validateAddress"
+
+        - timestamp: "2024-11-28T07:44:32Z"
+          level: "INFO"
+          message: "validation successful via current provider"
+          function: "validateAddress"
+
+        # More normal noise between the historical entries
+        - timestamp: "2024-11-28T07:14:00Z"
+          level: "INFO"
+          message: "[PlaceOrder] user_id=usr-3c45d2 user_currency=USD"
+          function: "PlaceOrder"
+
+        - timestamp: "2024-11-28T07:14:15Z"
+          level: "INFO"
+          message: "payment went through transaction_id=tx-2a3b4c5d"
+          function: "PlaceOrder"
+
+        - timestamp: "2024-11-28T07:14:20Z"
+          level: "INFO"
+          message: "order placed app.order.id=ord-9f8e7d6c"
+          function: "PlaceOrder"
+
+        - timestamp: "2024-11-28T07:14:25Z"
+          level: "INFO"
+          message: "order confirmation email sent to user@example.com"
+          function: "sendOrderConfirmation"
+
+        - timestamp: "2024-11-28T07:20:00Z"
+          level: "INFO"
+          message: "[PlaceOrder] user_id=usr-7d89e4 user_currency=USD"
+          function: "PlaceOrder"
+
+        - timestamp: "2024-11-28T07:25:00Z"
+          level: "INFO"
+          message: "sending to postProcessor"
+          function: "sendToPostProcessor"
+
+        - timestamp: "2024-11-28T07:30:00Z"
+          level: "INFO"
+          message: "[PlaceOrder] user_id=usr-5f23a1 user_currency=EUR"
+          function: "PlaceOrder"
+
+# ===========================================================================
+# FEATURE FLAGS
+# Renamed from "addressValidationProvider" to "q4-provider-migration"
+# ===========================================================================
+feature_flags:
+  - flag: "q4-provider-migration"
+    current_value: "current"
+    state: "ENABLED"
+    last_modified: "2024-11-28T07:13:00Z"
+    variants:
+      legacy: "legacy"
+      current: "current"
+
+  - flag: "paymentUnreachable"
+    current_value: false
+    state: "ENABLED"
+
+  - flag: "kafkaQueueProblems"
+    current_value: 0
+    state: "ENABLED"
+
+  - flag: "loadGeneratorFloodHomepage"
+    current_value: 0
+    state: "ENABLED"
+
+  - flag: "productCatalogFailure"
+    current_value: false
+    state: "ENABLED"
+
+  - flag: "cartFailure"
+    current_value: false
+    state: "ENABLED"
+
+  - flag: "paymentFailure"
+    current_value: 0
+    state: "ENABLED"
+
+  - flag: "adHighCpu"
+    current_value: false
+    state: "ENABLED"
+
+  - flag: "adFailure"
+    current_value: false
+    state: "ENABLED"
+
+  - flag: "recommendationCacheFailure"
+    current_value: false
+    state: "ENABLED"
+
+  - flag: "imageSlowLoad"
+    current_value: 0
+    state: "ENABLED"
+
+  - flag: "failedReadinessProbe"
+    current_value: false
+    state: "ENABLED"
+
+  - flag: "emailMemoryLeak"
+    current_value: 0
+    state: "ENABLED"
+
+  - flag: "llmInaccurateResponse"
+    current_value: false
+    state: "ENABLED"
+
+  - flag: "llmRateLimitError"
+    current_value: false
+    state: "ENABLED"
+
+# ===========================================================================
+# GIT HISTORY
+# ===========================================================================
+git:
+  recent_commits:
+    - hash: "a8f3c21"
+      date: "2024-11-25"
+      author: "priya"
+      message: "perf: consolidate outbound HTTP transports for connection reuse"
+      files: ["src/checkout/main.go"]
+
+    - hash: "f47b2e3"
+      date: "2024-11-24"
+      author: "dan"
+      message: "fix: handle nil response in product catalog client"
+      files: ["src/checkout/main.go"]
+
+    - hash: "b92e147"
+      date: "2024-11-20"
+      author: "james"
+      message: "feat: add shipping address pre-check to checkout flow"
+      files: ["src/checkout/address_validation.go", "src/checkout/main.go"]
+
+    - hash: "c4d8f93"
+      date: "2024-11-18"
+      author: "james"
+      message: "perf: cache flag evaluations to reduce flagd load on hot paths"
+      files: ["src/checkout/address_validation.go"]
+
+    - hash: "d91a4c7"
+      date: "2024-11-22"
+      author: "priya"
+      message: "chore: update Go dependencies to latest"
+      files: ["src/checkout/go.mod", "src/checkout/go.sum"]
+
+    - hash: "e1f2a56"
+      date: "2024-11-27"
+      author: "bot"
+      message: "chore: config refresh (no changes)"
+      files: []
+
+    - hash: "7c3e8a2"
+      date: "2024-11-23"
+      author: "marcus"
+      message: "feat: add order total to PlaceOrder span attributes"
+      files: ["src/checkout/main.go"]
+
+    - hash: "9b5d1f4"
+      date: "2024-11-19"
+      author: "dan"
+      message: "refactor: extract money helpers to separate package"
+      files: ["src/checkout/money/money.go"]

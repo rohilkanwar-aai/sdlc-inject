@@ -1,0 +1,290 @@
+{
+  "codebase_path": "opentelemetry-demo",
+  "files_analyzed": 41,
+  "total_tokens_used": 0,
+  "total_cost_usd": 1.4300981000000004,
+  "architecture_summary": "This codebase is the OpenTelemetry Demo, a polyglot microservices e-commerce application. The frontend is a Next.js application that serves as a BFF (Backend-for-Frontend), making gRPC calls to backend microservices (Cart, Checkout, ProductCatalog, Currency, Recommendations, Ad, ProductReview) and HTTP calls to Shipping and Email services. The Go Checkout service orchestrates the critical PlaceOrder flow across 7+ services. The Rust Shipping service provides quote and order shipping via HTTP/REST. The Python Recommendation and ProductReview services handle product discovery and review management, with the ProductReview service integrating with an LLM for AI-powered product Q&A. All services communicate via gRPC except Shipping (HTTP/REST), and order events are published to Kafka. Feature flags via flagd/OpenFeature control failure injection scenarios.",
+  "concurrency_model": "The frontend (Next.js) uses single-threaded async/await with Promise.all for fan-out patterns. Singleton gRPC clients are shared across all requests in the Node.js process. The Go Checkout service uses goroutines for Kafka message flooding (feature flag) but processes orders sequentially within each request. Python services (Recommendation, ProductReview) use grpc.server with ThreadPoolExecutor(max_workers=10), meaning only 10 concurrent requests can be processed. The Rust Shipping service uses Actix-web's async runtime. There is no connection pooling for database access in the Python services, and HTTP connections share a single transport in the Go checkout service.",
+  "vulnerability_points": [
+    {
+      "file_path": "src/checkout/main.go",
+      "lines": "304-408",
+      "type": "cascade",
+      "confidence": 0.96,
+      "explanation": "PlaceOrder orchestrates 7+ services sequentially with no saga/compensation pattern. The critical failure path is: after chargeCard succeeds (line 344), if shipOrder fails (line 357), the payment has been charged but the order is not shipped, and there is no rollback of the payment. Similarly, emptyUserCart errors are silently ignored (line 364 `_ = cs.emptyUserCart`), so if cart emptying fails, the user's cart still has items after a successful order. The entire checkout is a non-atomic multi-service operation: Cart -> ProductCatalog -> Currency -> Shipping(HTTP) -> Payment -> Shipping(HTTP) -> Email(HTTP) -> Kafka. Any mid-sequence failure leaves the system in an inconsistent state.",
+      "suggested_injection": "Inject a transient failure in shipOrder (HTTP 503 from shipping service) AFTER chargeCard succeeds. The payment is charged but shipping fails, returning an error to the user. There is no payment reversal. The cart is not emptied. The user retries and gets double-charged.",
+      "affected_functions": [
+        "PlaceOrder"
+      ],
+      "data_flow": "PlaceOrder -> getUserCart(gRPC) -> prepOrderItems(N \u00d7 gRPC ProductCatalog + N \u00d7 gRPC Currency) -> quoteShipping(HTTP) -> convertCurrency(gRPC) -> chargeCard(gRPC Payment) -> shipOrder(HTTP Shipping) -> emptyUserCart(gRPC Cart) -> sendOrderConfirmation(HTTP Email) -> sendToPostProcessor(Kafka)",
+      "similar_vulnerabilities": [],
+      "related_incidents": []
+    },
+    {
+      "file_path": "src/frontend/pages/api/checkout.ts",
+      "lines": "18-33",
+      "type": "cascade",
+      "confidence": 0.95,
+      "explanation": "After PlaceOrder succeeds (which charges the credit card, ships the order, and empties the cart), the handler fans out N parallel calls to ProductCatalogService.getProduct for each order item. Each of those calls chains through ProductCatalogGateway.getProduct (gRPC) and then CurrencyGateway.convert (another gRPC call). If the ProductCatalog or Currency service is slow or down, ALL promises in Promise.all will fail, causing an unhandled rejection that propagates as a 500 error to the client. The order was already placed, payment charged, and cart emptied, but the user sees an error. There is no timeout, no circuit breaker, no retry, and no fallback. The fan-out amplifies a single backend failure into N concurrent failing requests.",
+      "suggested_injection": "Inject a 5-second delay or intermittent UNAVAILABLE error into ProductCatalogService.getProduct after PlaceOrder succeeds. This simulates ProductCatalog degradation that cascades into a checkout failure despite the order being fully processed.",
+      "affected_functions": [
+        "handler (POST /api/checkout)"
+      ],
+      "data_flow": "Client POST -> CheckoutGateway.placeOrder(gRPC) -> [card charged, order shipped, cart emptied] -> Promise.all(N \u00d7 ProductCatalogService.getProduct) -> N \u00d7 (ProductCatalogGateway.getProduct(gRPC) + CurrencyGateway.convert(gRPC)) -> 500 to client",
+      "similar_vulnerabilities": [],
+      "related_incidents": []
+    },
+    {
+      "file_path": "src/frontend/pages/api/cart.ts",
+      "lines": "17-31",
+      "type": "cascade",
+      "confidence": 0.93,
+      "explanation": "The cart page load fans out a parallel ProductCatalogService.getProduct call for every item in the cart. Each getProduct call internally calls ProductCatalogGateway (gRPC) then CurrencyGateway.convert (gRPC). If either backend is degraded, the entire cart page fails with an unhandled error. There are no timeouts, no fallbacks, and no partial rendering. A user with 10 items generates 10 gRPC calls to ProductCatalog and 10 to Currency simultaneously. Every page load by every user hits this path, making it the highest-frequency cascade amplification point in the system.",
+      "suggested_injection": "Inject intermittent latency (2-3s) into CurrencyGateway.convert. Since every cart view triggers N currency conversions and there's no timeout, this cascades into cart page timeouts proportional to cart size.",
+      "affected_functions": [
+        "handler (GET /api/cart)"
+      ],
+      "data_flow": "Client GET /api/cart -> CartGateway.getCart(gRPC) -> Promise.all(N \u00d7 ProductCatalogService.getProduct) -> N \u00d7 (gRPC ProductCatalog + gRPC Currency) -> 500 to client",
+      "similar_vulnerabilities": [],
+      "related_incidents": []
+    },
+    {
+      "file_path": "src/frontend/pages/api/recommendations.ts",
+      "lines": "16-22",
+      "type": "cascade",
+      "confidence": 0.92,
+      "explanation": "Recommendations endpoint chains three services: RecommendationService (gRPC) -> then fans out up to 4 parallel ProductCatalogService.getProduct calls, each of which internally calls ProductCatalog (gRPC) + Currency (gRPC). Failure of any single downstream service fails the entire recommendations response. Additionally, the Recommendation service itself calls ProductCatalog internally (line 95 in recommendation_server.py), so a ProductCatalog failure causes a double cascade: first inside Recommendation, then in the frontend enrichment. No error handling, no timeout, no circuit breaker.",
+      "suggested_injection": "Inject a slow response (3s) into the RecommendationService gRPC call. The entire recommendations widget blocks, and the client request hangs with no timeout. Combined with frontend SSR, this blocks page rendering.",
+      "affected_functions": [
+        "handler (GET /api/recommendations)"
+      ],
+      "data_flow": "Client GET -> RecommendationsGateway(gRPC) -> [internally: ProductCatalog(gRPC)] -> Promise.all(4 \u00d7 ProductCatalogService.getProduct) -> 4 \u00d7 (ProductCatalog(gRPC) + Currency(gRPC)) -> 500 to client",
+      "similar_vulnerabilities": [],
+      "related_incidents": []
+    },
+    {
+      "file_path": "src/frontend/services/ProductCatalog.service.ts",
+      "lines": "16-28",
+      "type": "cascade",
+      "confidence": 0.92,
+      "explanation": "The product listing page calls ProductCatalogGateway.listProducts (1 gRPC call) then fans out a CurrencyGateway.convert call for EVERY product in the catalog. For a catalog of N products, this generates N parallel gRPC calls to the Currency service. If the catalog grows or the Currency service is slow, this creates an unbounded fan-out. The non-null assertion `product.priceUsd!` will throw if any product lacks a price. Promise.all means a single Currency conversion failure kills the entire product listing. There is no caching, no batching, and no fallback to showing prices in the default currency.",
+      "suggested_injection": "Inject a 1s delay into the Currency service Convert RPC. For a catalog of 20 products, this creates 20 concurrent gRPC requests that all take 1s, potentially overwhelming the Currency service connection pool and causing cascading timeouts across all product page loads.",
+      "affected_functions": [
+        "listProducts"
+      ],
+      "data_flow": "listProducts -> ProductCatalogGateway.listProducts(gRPC) -> Promise.all(N \u00d7 CurrencyGateway.convert(gRPC)) -> response with all products",
+      "similar_vulnerabilities": [],
+      "related_incidents": []
+    },
+    {
+      "file_path": "src/frontend/pages/api/shipping.ts",
+      "lines": "14-19",
+      "type": "cascade",
+      "confidence": 0.91,
+      "explanation": "The shipping cost calculation is a sequential two-service chain with no error handling: ShippingGateway (HTTP POST to Rust service) -> then CurrencyGateway.convert (gRPC). The non-null assertion `costUsd!` will throw a runtime error if ShippingGateway returns undefined/null. Additionally, query parameter parsing via JSON.parse with no try-catch means malformed query strings cause unhandled exceptions. The ShippingGateway itself makes an HTTP call to the Rust shipping service, which internally calls the quote service (another HTTP call), creating a 3-deep service chain.",
+      "suggested_injection": "Inject a timeout or 503 from the quote service (called by shipping's request_quote). The error cascades through shipping -> frontend shipping handler -> crash on costUsd! assertion -> 500 to client. No retry, no fallback price.",
+      "affected_functions": [
+        "handler (GET /api/shipping)"
+      ],
+      "data_flow": "Client GET -> JSON.parse(query params) -> ShippingGateway(HTTP) -> Shipping Rust Service -> Quote Service(HTTP) -> CurrencyGateway.convert(gRPC) -> response",
+      "similar_vulnerabilities": [],
+      "related_incidents": []
+    },
+    {
+      "file_path": "src/product-reviews/product_reviews_server.py",
+      "lines": "155-310",
+      "type": "cascade",
+      "confidence": 0.91,
+      "explanation": "The AI assistant creates a deep cascade chain: LLM call -> tool call to fetch_product_reviews (DB query) or fetch_product_info (gRPC to ProductCatalog) -> second LLM call. This function has no timeouts on LLM calls, no timeouts on the tool call gRPC/DB operations, and makes 2 sequential LLM API calls. If the LLM service is slow, the gRPC thread is blocked for the entire duration. With only 10 max_workers (line 361), 10 concurrent AI assistant requests can exhaust the thread pool. The fetch_product_info function (line 312-319) calls product_catalog_stub.GetProduct which shares the same gRPC channel used by all other product catalog calls in this service.",
+      "suggested_injection": "Inject a 10s delay in the LLM service response. With 10 worker threads and 2 LLM calls per request, just 5 concurrent AI assistant requests will exhaust the thread pool, blocking ALL product review operations (GetProductReviews, GetAverageProductReviewScore) from being served.",
+      "affected_functions": [
+        "get_ai_assistant_response"
+      ],
+      "data_flow": "Client -> ProductReview gRPC -> LLM API call #1 -> [tool: DB query OR gRPC to ProductCatalog] -> LLM API call #2 -> response",
+      "similar_vulnerabilities": [],
+      "related_incidents": []
+    },
+    {
+      "file_path": "src/checkout/main.go",
+      "lines": "416-460",
+      "type": "cascade",
+      "confidence": 0.9,
+      "explanation": "This function chains 4 sequential service calls where each depends on the previous result. prepOrderItems (line 431) iterates over ALL cart items sequentially, calling ProductCatalog + Currency for each item. For a cart with N items, this creates 2N sequential gRPC round-trips before even reaching shipping quote. Total sequential calls: 1 (cart) + 2N (product+currency per item) + 1 (shipping HTTP) + 1 (currency convert) = 2N+3 sequential network hops. Any single hop failure aborts the entire preparation. There's no parallelism in prepOrderItems despite items being independent.",
+      "suggested_injection": "Inject 500ms latency into the Currency service Convert RPC. For a cart with 5 items, this adds 2.5s just for currency conversions in prepOrderItems, plus another 500ms for shipping cost conversion. Total added latency: 3s, making the entire checkout feel broken.",
+      "affected_functions": [
+        "prepareOrderItemsAndShippingQuoteFromCart"
+      ],
+      "data_flow": "getUserCart(gRPC) -> for each item: GetProduct(gRPC) + Convert(gRPC) -> quoteShipping(HTTP->HTTP) -> convertCurrency(gRPC)",
+      "similar_vulnerabilities": [],
+      "related_incidents": []
+    },
+    {
+      "file_path": "src/frontend/utils/Request.ts",
+      "lines": "12-34",
+      "type": "cascade",
+      "confidence": 0.9,
+      "explanation": "The universal HTTP request utility used by ALL client-side API calls has zero error handling: (1) No check of response.ok or response.status - a 500 error with a JSON body will be happily parsed and returned as if it were successful data. (2) No timeout - if the server hangs, the request hangs forever. (3) No retry logic. (4) JSON.parse on line 29 will throw on non-JSON error responses (e.g., HTML error pages), causing an unhandled exception. Every single API call in the frontend (cart, checkout, products, recommendations, ads, shipping, currency) flows through this function. A single backend returning an HTML error page would cause JSON.parse to throw, crashing the calling component.",
+      "suggested_injection": "Make any backend service return a non-JSON error response (e.g., a 502 Bad Gateway HTML page from a reverse proxy). The JSON.parse will throw an uncaught exception that propagates up to crash the React component, potentially causing a white screen of death.",
+      "affected_functions": [
+        "request"
+      ],
+      "data_flow": "Every ApiGateway method -> request() -> fetch() -> response.text() -> JSON.parse() -> caller",
+      "similar_vulnerabilities": [],
+      "related_incidents": []
+    },
+    {
+      "file_path": "src/recommendation/recommendation_server.py",
+      "lines": "67-113",
+      "type": "cascade",
+      "confidence": 0.89,
+      "explanation": "The recommendation service has an intentional memory leak via the cache (line 86-87: `cached_ids = cached_ids + response_ids` followed by `cached_ids = cached_ids + cached_ids[:len(cached_ids) // 4]`), but even without the feature flag, it makes a synchronous gRPC call to ProductCatalog.ListProducts on every single recommendation request. This creates a hard dependency: if ProductCatalog is slow, all recommendation requests block. The service uses global mutable state (`cached_ids`, `first_run`) with no thread safety - concurrent gRPC requests on the ThreadPoolExecutor can race on these globals. The feature flag check itself (line 78) makes a network call to flagd on every request.",
+      "suggested_injection": "Inject latency in the ProductCatalog ListProducts RPC. Since Recommendation calls it synchronously and the ThreadPoolExecutor has only 10 workers (line 161), 10 concurrent slow requests exhaust the thread pool, causing all subsequent recommendation requests to queue up and eventually timeout.",
+      "affected_functions": [
+        "get_product_list"
+      ],
+      "data_flow": "Frontend -> RecommendationsGateway(gRPC) -> RecommendationService -> check_feature_flag(HTTP to flagd) -> ProductCatalog.ListProducts(gRPC) -> response",
+      "similar_vulnerabilities": [],
+      "related_incidents": []
+    },
+    {
+      "file_path": "src/checkout/main.go",
+      "lines": "646-710",
+      "type": "cascade",
+      "confidence": 0.88,
+      "explanation": "The Kafka producer uses a select that races Successes() and Errors() channels. When the kafkaQueueProblems feature flag is enabled, it spawns ffValue goroutines that each send a message AND consume from the Successes channel. These goroutines race with the main goroutine's Successes/Errors select, potentially stealing success/error messages meant for other producers. The goroutines also don't handle errors at all (`_ = <-cs.KafkaProducerClient.Successes()`), meaning a goroutine could block forever if the message fails. Additionally, RequiredAcks is set to NoResponse (line 41 in producer.go), meaning Kafka writes are fire-and-forget with no delivery guarantee.",
+      "suggested_injection": "Enable the kafkaQueueProblems feature flag with a high value (e.g., 1000). The spawned goroutines will overwhelm the Kafka producer, steal success/error messages from legitimate sends, and potentially deadlock goroutines waiting on Successes() for messages that errored.",
+      "affected_functions": [
+        "sendToPostProcessor"
+      ],
+      "data_flow": "PlaceOrder -> sendToPostProcessor -> Kafka AsyncProducer Input channel -> [racing goroutines consume Success/Error channels]",
+      "similar_vulnerabilities": [],
+      "related_incidents": []
+    },
+    {
+      "file_path": "src/checkout/address_validation.go",
+      "lines": "99-146",
+      "type": "cascade",
+      "confidence": 0.88,
+      "explanation": "The retry logic with exponential backoff and 5 max retries (called on line 203) creates a worst-case total wait time of 2+4+8+16+32 = 62 seconds of blocking per checkout. This uses the sharedHTTPClient which has MaxConnsPerHost=20 (line 35). If the address validation endpoint returns 429 or 5xx, each checkout request will hold onto an HTTP connection for up to 62 seconds while retrying. With MaxConnsPerHost=20, only 20 concurrent checkouts can retry before connection pool exhaustion. All subsequent checkout requests to the address validation endpoint AND to other services sharing the same transport (shipping, email) will block waiting for connections, cascading the failure across all HTTP-based service calls.",
+      "suggested_injection": "Make the address validation endpoint return 503 consistently. Each checkout will retry 6 times over ~62 seconds, holding a connection from sharedTransport. After 20 concurrent checkouts, the shared HTTP transport is exhausted, and shipping quote + email confirmation calls start failing because they use the same transport.",
+      "affected_functions": [
+        "retryablePost"
+      ],
+      "data_flow": "PlaceOrder -> validateAddress -> retryablePost(5 retries, exponential backoff) -> sharedHTTPClient(shared transport, 20 max conns) -> blocks shipping and email calls",
+      "similar_vulnerabilities": [],
+      "related_incidents": []
+    },
+    {
+      "file_path": "src/product-reviews/database.py",
+      "lines": "28-53",
+      "type": "cascade",
+      "confidence": 0.87,
+      "explanation": "Every database call creates a new connection via psycopg2.connect() with no connection pooling. Under high load, this means N concurrent review requests create N database connections. There's no connection timeout configured, no statement timeout, and no connection pool limit. If the database is slow (e.g., due to lock contention or high load), connections pile up, potentially exhausting the PostgreSQL max_connections limit. Once max_connections is hit, ALL services that share the same PostgreSQL instance will fail to connect. The fetch_avg_product_review_score_from_db has the same pattern (lines 55-90).",
+      "suggested_injection": "Inject a 2s delay in database query response time. Without connection pooling, each slow query holds an exclusive connection. 50 concurrent requests create 50 connections, potentially hitting PostgreSQL's max_connections and cascading into failures for all database-dependent services.",
+      "affected_functions": [
+        "fetch_product_reviews_from_db"
+      ],
+      "data_flow": "Product review request -> psycopg2.connect(new connection each time) -> SQL query -> connection.close()",
+      "similar_vulnerabilities": [],
+      "related_incidents": []
+    },
+    {
+      "file_path": "src/checkout/main.go",
+      "lines": "560-575",
+      "type": "cascade",
+      "confidence": 0.87,
+      "explanation": "When the paymentUnreachable feature flag is enabled, chargeCard creates a NEW gRPC client connection to 'badAddress:50051' on every single charge attempt. mustCreateClient (line 462) calls grpc.NewClient which does NOT immediately fail for bad addresses - it creates a channel that will fail lazily on the first RPC. This means every flagged checkout attempt: (1) leaks a gRPC connection that's never closed (no defer c.Close()), (2) waits for the full gRPC dial timeout before failing, (3) the error from Charge will be a connection error that propagates as an Internal error to the user. The connection leak accumulates with every checkout attempt.",
+      "suggested_injection": "Enable the paymentUnreachable feature flag. Each checkout creates and leaks a gRPC connection, and the gRPC timeout (default 20s) adds massive latency to every checkout failure. Under load, this creates hundreds of leaked connections.",
+      "affected_functions": [
+        "chargeCard"
+      ],
+      "data_flow": "PlaceOrder -> chargeCard -> isFeatureFlagEnabled(network call to flagd) -> mustCreateClient(badAddress, connection leak) -> Charge(timeout waiting for bad host) -> error to user",
+      "similar_vulnerabilities": [],
+      "related_incidents": []
+    },
+    {
+      "file_path": "src/frontend/gateways/rpc/Cart.gateway.ts",
+      "lines": "1-29",
+      "type": "cascade",
+      "confidence": 0.86,
+      "explanation": "All gRPC gateway modules (Cart, Checkout, ProductCatalog, Currency, Recommendations, Ad, ProductReview) create a SINGLE gRPC client instance at module load time with no reconnection logic, no keepalive configuration, and no timeout. If the underlying gRPC connection enters a transient failure state (e.g., after a backend pod restart in Kubernetes), ALL requests through that gateway will fail until the gRPC channel recovers. Since Next.js API routes share the same Node.js process, a single broken gRPC channel affects ALL concurrent users. There are no deadline/timeout parameters on any gRPC call, meaning a hanging backend will cause the Node.js process to accumulate pending callbacks indefinitely.",
+      "suggested_injection": "Restart the Cart service pod. The singleton gRPC client in the frontend will attempt to use the broken connection, and depending on gRPC's reconnection backoff, all cart operations may fail for several seconds. With no timeout configured, requests during the reconnection window hang indefinitely.",
+      "affected_functions": [
+        "CartGateway (module-level singleton)"
+      ],
+      "data_flow": "All users -> shared Next.js process -> singleton gRPC client -> single gRPC channel -> backend service",
+      "similar_vulnerabilities": [],
+      "related_incidents": []
+    }
+  ],
+  "recommended_patterns": [
+    {
+      "pattern_id": "CASCADE-001",
+      "confidence": 0.96,
+      "target_files": [
+        "src/checkout/main.go"
+      ],
+      "rationale": "PlaceOrder's sequential 7-service chain with no saga pattern or compensation. Payment-then-shipping failure path leaves system in inconsistent state. Highest business impact: charged but unshipped orders."
+    },
+    {
+      "pattern_id": "CASCADE-002",
+      "confidence": 0.95,
+      "target_files": [
+        "src/frontend/pages/api/checkout.ts",
+        "src/frontend/pages/api/cart.ts",
+        "src/frontend/pages/api/recommendations.ts"
+      ],
+      "rationale": "Promise.all fan-out in frontend API handlers amplifies single-service failures. ProductCatalog or Currency degradation cascades into all pages simultaneously through unbounded parallel gRPC calls."
+    },
+    {
+      "pattern_id": "CASCADE-003",
+      "confidence": 0.92,
+      "target_files": [
+        "src/frontend/services/ProductCatalog.service.ts"
+      ],
+      "rationale": "ProductCatalogService.listProducts creates N parallel Currency conversion calls per catalog load. Currency service is the single point of failure for the entire storefront. No caching, no fallback."
+    },
+    {
+      "pattern_id": "CASCADE-004",
+      "confidence": 0.91,
+      "target_files": [
+        "src/product-reviews/product_reviews_server.py"
+      ],
+      "rationale": "AI assistant's dual LLM calls + tool invocations (DB + gRPC) within a 10-thread pool. Slow LLM responses exhaust thread pool, cascading into blocking ALL product review operations."
+    },
+    {
+      "pattern_id": "CASCADE-005",
+      "confidence": 0.9,
+      "target_files": [
+        "src/checkout/address_validation.go"
+      ],
+      "rationale": "Retry loop with 62-second worst-case hold time on sharedHTTPClient. Connection pool exhaustion cascades to shipping and email services that share the same HTTP transport."
+    },
+    {
+      "pattern_id": "RACE-001",
+      "confidence": 0.85,
+      "target_files": [
+        "src/react-native-app/gateways/Session.gateway.ts"
+      ],
+      "rationale": "setSessionValue fails to await async getSession(), spreading a Promise object instead of session data. Latent bug that corrupts session on first currency change."
+    },
+    {
+      "pattern_id": "COORD-001",
+      "confidence": 0.88,
+      "target_files": [
+        "src/checkout/main.go",
+        "src/checkout/kafka/producer.go"
+      ],
+      "rationale": "Kafka producer feature flag spawns racing goroutines that steal Success/Error channel messages. NoResponse ack mode means order events are fire-and-forget with no delivery guarantee."
+    },
+    {
+      "pattern_id": "RACE-002",
+      "confidence": 0.87,
+      "target_files": [
+        "src/recommendation/recommendation_server.py"
+      ],
+      "rationale": "Global mutable state (cached_ids, first_run) accessed by concurrent ThreadPoolExecutor workers with no thread synchronization. Cache list can be corrupted by interleaved reads and writes."
+    }
+  ],
+  "discovered_tools": []
+}

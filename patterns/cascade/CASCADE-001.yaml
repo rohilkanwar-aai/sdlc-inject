@@ -1,0 +1,518 @@
+id: CASCADE-001
+version: "2.0"
+name: "Payment connection leak -> Redis eviction -> duplicate orders -> account lockout"
+category: "Cascading Failures"
+subcategory: "Resource Exhaustion Chains"
+
+sdlc_phases:
+  primary: "Debugging"
+  secondary: ["Maintenance", "Verification"]
+
+description: |
+  A 7-hop cascading failure where a missing conn.close() in the payment service's
+  error path causes connection leaks. Reconnect storms flood Redis with payment-event
+  keys, triggering LRU eviction of order service idempotency keys. Without idempotency
+  protection, retries create duplicate orders, causing double charges. The fraud
+  detection system auto-suspends accounts with duplicate charges.
+
+  The agent sees: "Customers are locked out of their accounts."
+  The root cause is: A missing conn.close() - 7 hops away.
+
+  Critical insight: The payment service has NO ERRORS in Sentry. The "significant
+  silence" from the actual culprit is a key signal that most agents miss.
+
+# Causal chain mapping (from root cause to symptom)
+causal_chain:
+  - hop: 1
+    component: "payment-service"
+    failure: "Connection leak in error handler (missing conn.close())"
+    boundary_type: "code"
+    evidence_difficulty: "hard"
+    evidence_location: "source_code"
+    significant_silence: true  # NO ERRORS - this is critical
+
+  - hop: 2
+    component: "payment-service -> redis"
+    failure: "Reconnect storms flush event backlog, flooding Redis with payment-event:* keys"
+    boundary_type: "infrastructure"
+    evidence_difficulty: "medium"
+    evidence_location: "redis-cli --scan"
+
+  - hop: 3
+    component: "redis"
+    failure: "Hits maxmemory, allkeys-lru eviction drops order-service keys"
+    boundary_type: "infrastructure"
+    evidence_difficulty: "medium"
+    evidence_location: "redis-cli INFO stats"
+
+  - hop: 4
+    component: "order-service"
+    failure: "Loses idempotency keys for in-flight orders"
+    boundary_type: "service"
+    evidence_difficulty: "medium"
+    evidence_location: "application_logs"
+
+  - hop: 5
+    component: "order-service"
+    failure: "Retry logic creates duplicate orders (idempotency check fails on cache miss)"
+    boundary_type: "conceptual"
+    evidence_difficulty: "medium"
+    evidence_location: "database_query"
+
+  - hop: 6
+    component: "payment-gateway"
+    failure: "Customer charged twice"
+    boundary_type: "service"
+    evidence_difficulty: "medium"
+    evidence_location: "database_query"
+
+  - hop: 7
+    component: "fraud-service"
+    failure: "Auto-suspends accounts with duplicate charges"
+    boundary_type: "business_logic"
+    evidence_difficulty: "easy"
+    evidence_location: "sentry, pagerduty"
+
+# What the agent sees as the initial symptom
+task_prompt: |
+  Multiple customers have reported being locked out of their accounts over the
+  past 4 hours. The #support channel shows 8 reports, all from customers who
+  recently placed orders. The fraud team says the accounts were auto-suspended
+  by the duplicate charge detection rule.
+
+  Investigate why legitimate customers are triggering fraud rules and resolve
+  the issue.
+
+requirements:
+  languages: ["python", "go", "typescript", "java"]
+  patterns:
+    - "connection_pool"
+    - "error_handler"
+    - "redis_cache"
+    - "idempotency"
+    - "retry_logic"
+  frameworks: ["fastapi", "express", "spring", "gin"]
+  infrastructure:
+    - "redis"
+    - "postgres"
+    - "message_queue"
+  min_services: 4
+
+# Evidence map - what exists at each hop and how to access it
+evidence_map:
+  # Hop 7: Account suspension (EASY - starting point)
+  - hop: 7
+    source: "sentry"
+    tool: "sentry_list_issues(project='fraud-service')"
+    evidence: "FraudRuleTriggered: duplicate_charge detected for user_id=*"
+    reveals: "Accounts suspended due to duplicate charge rule"
+    points_toward: "Why are there duplicate charges?"
+
+  - hop: 7
+    source: "pagerduty"
+    tool: "pagerduty_list_incidents()"
+    evidence: "High-urgency: Multiple fraud suspensions in 4 hours"
+    reveals: "Spike in fraud rule triggers"
+
+  - hop: 7
+    source: "slack"
+    tool: "slack_get_messages(channel='support')"
+    evidence: "Customer complaints about account lockout after ordering"
+    reveals: "Pattern: all affected customers recently placed orders"
+    red_herring: "Teammate suggests: 'Maybe the fraud threshold is too sensitive?'"
+
+  # Hop 6: Duplicate charges (MEDIUM)
+  - hop: 6
+    source: "database"
+    tool: "bash: psql -c 'SELECT user_id, COUNT(*) FROM charges WHERE created_at > now() - interval 4 hours GROUP BY user_id HAVING COUNT(*) > 1'"
+    evidence: "Users with 2+ charges for same order within seconds"
+    reveals: "Charges are actually duplicated, not false positives"
+    points_toward: "Why are duplicate charges being created?"
+
+  # Hop 5: Duplicate orders (MEDIUM)
+  - hop: 5
+    source: "database"
+    tool: "bash: psql -c 'SELECT order_id, idempotency_key, COUNT(*) FROM orders GROUP BY order_id, idempotency_key HAVING COUNT(*) > 1'"
+    evidence: "Orders with same idempotency_key created multiple times"
+    reveals: "Idempotency protection is failing"
+    points_toward: "Why isn't idempotency preventing duplicates?"
+
+  # Hop 4: Idempotency key missing (MEDIUM)
+  - hop: 4
+    source: "logs"
+    tool: "bash: grep 'idempotency' /var/log/order-service/app.log | tail -100"
+    evidence: "'idempotency key not found in cache, proceeding with order creation'"
+    reveals: "Cache misses are causing idempotency failures"
+    points_toward: "Why are idempotency keys missing from cache?"
+
+  # Hop 3: Redis eviction (MEDIUM)
+  - hop: 3
+    source: "redis"
+    tool: "bash: redis-cli INFO stats | grep evicted"
+    evidence: "evicted_keys: 47823 (spiking)"
+    reveals: "Redis is evicting keys due to memory pressure"
+    points_toward: "What's filling up Redis?"
+
+  - hop: 3
+    source: "metrics"
+    tool: "prometheus_query('redis_memory_used_bytes')"
+    evidence: "Memory at 99.8% of maxmemory"
+    reveals: "Redis is at capacity"
+    red_herring: "Datadog shows 94% hit rate - looks healthy at first glance"
+
+  # Hop 2: Payment event flood (MEDIUM)
+  - hop: 2
+    source: "redis"
+    tool: "bash: redis-cli --scan --pattern 'payment-event:*' | wc -l"
+    evidence: "847,293 payment-event:* keys (should be <10,000)"
+    reveals: "Payment service is flooding Redis with event keys"
+    points_toward: "Why is payment service creating so many keys?"
+
+  # Hop 1: Connection leak (HARD - significant silence)
+  - hop: 1
+    source: "sentry"
+    tool: "sentry_list_issues(project='payment-service')"
+    evidence: "NO ISSUES FOUND"
+    reveals: "Payment service has no errors - this is the KEY SIGNAL"
+    insight: "The service with the bug has no visible errors"
+
+  - hop: 1
+    source: "logs"
+    tool: "bash: grep -i 'error\\|exception' /var/log/payment-service/app.log"
+    evidence: "Occasional 'connection reset by peer' - no stack traces"
+    reveals: "Connections are being dropped but no exceptions raised"
+
+  - hop: 1
+    source: "metrics"
+    tool: "prometheus_query('payment_service_db_connections_active')"
+    evidence: "Connections climbing: 45 -> 89 -> 156 -> 234 over 4 hours"
+    reveals: "Connection count increasing without release"
+
+  - hop: 1
+    source: "source_code"
+    tool: "bash: cat payment-service/handlers/checkout.py"
+    evidence: |
+      try:
+          conn = pool.get_connection()
+          result = conn.execute(query)
+          return result
+      except PaymentError as e:
+          logger.warning(f"Payment failed: {e}")
+          return {"error": str(e)}
+          # BUG: Missing conn.close() in error path!
+      finally:
+          # This only runs on success path due to early return
+          pass
+    reveals: "Missing conn.close() in exception handler"
+
+# Red herrings and wrong hypotheses
+red_herrings:
+  - source: "slack"
+    message: "Maybe we should increase Redis memory? It's been at 6GB for a while."
+    why_wrong: "Increasing memory only delays the problem; leak will fill any size"
+
+  - source: "slack"
+    message: "Could be the retry count increase we deployed last week - PR #4521"
+    why_wrong: "Retries are working correctly; the bug predates this change"
+
+  - source: "sentry"
+    project: "order-service"
+    issue: "CacheMissError: Key not found in Redis"
+    why_wrong: "This is a symptom, not the cause - loud errors distract from silent leak"
+
+  - source: "recent_pr"
+    title: "Increase payment retry count from 3 to 5"
+    why_wrong: "Unrelated change; timing correlation but no causation"
+
+# What shallow fixes look like (should be punished)
+shallow_fixes:
+  - fix: "Increase Redis maxmemory"
+    why_fails: "Leak will fill any amount of memory; only delays failure"
+    detection: "Config change to redis.conf without code changes"
+
+  - fix: "Lower fraud rule threshold"
+    why_fails: "Real duplicates exist; lowering threshold enables fraud"
+    detection: "Changes to fraud service config"
+
+  - fix: "Disable idempotency check"
+    why_fails: "Makes duplicate orders even more likely"
+    detection: "Code change removing idempotency logic"
+
+  - fix: "Add more aggressive key expiration"
+    why_fails: "Treats symptom; payment keys will still accumulate"
+    detection: "Redis TTL changes without addressing leak"
+
+difficulty:
+  estimated_human_time_hours: 6
+  frontier_model_pass_rate_percent: 12
+  hop_count: 7
+  complexity_factors:
+    - "7 hops from symptom to root cause"
+    - "Root cause service has NO errors (significant silence)"
+    - "Multiple plausible red herrings"
+    - "Each hop requires different investigative tool"
+    - "Shallow fixes are punished by causal structure"
+    - "Symptoms naturally point away from root cause"
+
+failure_modes:
+  common:
+    - mode: "Blame fraud rules"
+      description: "Adjusts fraud thresholds without investigating duplicates"
+      detection: "Changes to fraud-service config without tracing to orders"
+      hop_reached: 7
+
+    - mode: "Increase Redis memory"
+      description: "Treats memory pressure symptom without finding leak"
+      detection: "Redis config changes without investigating key flood"
+      hop_reached: 3
+
+    - mode: "Fix order service"
+      description: "Adds retry limits or cache TTL to order service"
+      detection: "Changes to order-service without finding payment leak"
+      hop_reached: 4
+
+    - mode: "Blame recent PR"
+      description: "Reverts retry count change thinking it's the cause"
+      detection: "Git revert of unrelated PR"
+      hop_reached: 0
+
+  subtle:
+    - mode: "Find leak but wrong fix"
+      description: "Identifies connection leak but adds pool exhaustion handling instead of close()"
+      detection: "Adds connection timeout but not proper cleanup"
+      hop_reached: 1
+
+    - mode: "Partial investigation"
+      description: "Finds Redis eviction but doesn't trace to payment service"
+      detection: "Stops at hop 2-3 without finding root cause"
+      hop_reached: 3
+
+golden_path:
+  overview: |
+    A senior engineer traces from account lockouts through 7 hops to find
+    the missing conn.close(). Each hop requires a different tool and crosses
+    a different boundary. The key insight is recognizing that the payment
+    service's SILENCE is significant - the culprit has no errors.
+
+  steps:
+    - step: 1
+      action: "Read customer complaints and understand symptom"
+      tools: ["slack_get_messages('#support')", "pagerduty_list_incidents()"]
+      evidence: "Lockouts correlate with recent orders"
+      time_estimate_minutes: 10
+      hop: 7
+
+    - step: 2
+      action: "Verify fraud suspensions are for duplicate charges"
+      tools: ["sentry_list_issues(project='fraud-service')", "psql charges table"]
+      evidence: "Duplicate charge records exist, not false positives"
+      time_estimate_minutes: 15
+      hop: 6-7
+
+    - step: 3
+      action: "Trace duplicate charges to duplicate orders"
+      tools: ["psql orders table"]
+      query: "SELECT order_id, idempotency_key, COUNT(*) FROM orders GROUP BY 1,2 HAVING COUNT(*) > 1"
+      evidence: "Same idempotency_key used for multiple orders"
+      key_insight: "Idempotency is failing"
+      time_estimate_minutes: 15
+      hop: 5
+
+    - step: 4
+      action: "Find why idempotency keys are missing"
+      tools: ["grep order-service logs"]
+      command: "grep 'idempotency' /var/log/order-service/app.log"
+      evidence: "'key not found in cache, proceeding'"
+      key_insight: "Cache misses causing idempotency failures"
+      time_estimate_minutes: 15
+      hop: 4
+
+    - step: 5
+      action: "Investigate Redis memory pressure"
+      tools: ["redis-cli INFO stats", "prometheus_query()"]
+      evidence: "evicted_keys spiking, memory at limit"
+      key_insight: "LRU eviction dropping order-service keys"
+      time_estimate_minutes: 15
+      hop: 3
+
+    - step: 6
+      action: "Find what's flooding Redis"
+      tools: ["redis-cli --scan --pattern '*'"]
+      evidence: "847K payment-event:* keys (should be <10K)"
+      key_insight: "Payment service is the source of memory pressure"
+      time_estimate_minutes: 10
+      hop: 2
+
+    - step: 7
+      action: "Investigate payment service (CRITICAL INSIGHT)"
+      tools: ["sentry_list_issues(project='payment-service')"]
+      evidence: "NO ISSUES - significant silence"
+      key_insight: "The culprit service has no errors. Check connections."
+      time_estimate_minutes: 15
+      hop: 1
+
+    - step: 8
+      action: "Check payment service metrics and connections"
+      tools: ["prometheus_query('payment_service_db_connections_active')"]
+      evidence: "Connection count climbing without release"
+      key_insight: "Connection leak confirmed"
+      time_estimate_minutes: 10
+      hop: 1
+
+    - step: 9
+      action: "Read payment service error handling code"
+      tools: ["read source code"]
+      evidence: "Missing conn.close() in except block"
+      fix: "Add conn.close() or use context manager"
+      time_estimate_minutes: 20
+      hop: 1
+
+    - step: 10
+      action: "Fix, deploy, verify recovery"
+      tools: ["edit code", "deploy", "monitor metrics"]
+      verification: |
+        Connection count stabilizes. Redis evictions drop to zero. No new duplicate orders. Unsuspend affected accounts.
+      time_estimate_minutes: 30
+
+grading:
+  total_weight: 1.0
+
+  # Root cause understanding (50%)
+  understanding:
+    - criterion: "Traced duplicate charges to duplicate orders"
+      weight: 0.10
+      verification: "LLM judge on transcript"
+
+    - criterion: "Identified idempotency failure from cache miss"
+      weight: 0.10
+      verification: "LLM judge on transcript"
+
+    - criterion: "Connected cache miss to Redis eviction"
+      weight: 0.10
+      verification: "LLM judge on transcript"
+
+    - criterion: "Found payment service as source of memory pressure"
+      weight: 0.10
+      verification: "LLM judge on transcript"
+
+    - criterion: "Recognized significant silence (no payment errors)"
+      weight: 0.10
+      verification: "LLM judge - mentions 'no errors' as significant"
+
+  # Core outcome (25%)
+  outcome_based:
+    - criterion: "Found and fixed the connection leak"
+      weight: 0.15
+      verification:
+        type: "file_check"
+        pattern: "conn\\.close\\(\\)|with.*connection|finally:.*close"
+
+    - criterion: "System recovers (no new duplicate orders)"
+      weight: 0.10
+      verification:
+        type: "integration_test"
+        command: "pytest tests/test_no_duplicates.py"
+
+  # Ancillary fixes (10%)
+  ancillary:
+    - criterion: "Unsuspended affected accounts"
+      weight: 0.05
+      verification:
+        type: "db_check"
+        query: "SELECT COUNT(*) FROM accounts WHERE suspended_at > now() - interval '4 hours' AND suspension_reason = 'duplicate_charge'"
+        expected: 0
+
+    - criterion: "Didn't weaken fraud rules"
+      weight: 0.05
+      verification:
+        type: "file_check"
+        file: "fraud-service/config.py"
+        pattern_absent: "threshold.*=.*[0-9]+"
+
+  # No collateral damage (5%)
+  collateral:
+    - criterion: "Didn't disable idempotency"
+      weight: 0.025
+      verification: "Code check - idempotency logic intact"
+
+    - criterion: "Didn't revert unrelated PR"
+      weight: 0.025
+      verification: "Git history check"
+
+  # Communication (10%)
+  communication:
+    - criterion: "Incident report quality"
+      weight: 0.10
+      verification: "LLM judge on incident report file"
+      criteria:
+        - "Explains full causal chain"
+        - "Documents timeline"
+        - "Includes remediation steps"
+        - "Proposes prevention measures"
+
+hints:
+  progressive:
+    - level: 1
+      trigger_condition: "no_progress_minutes >= 30"
+      content: "The duplicate charges are real, not false positives. Trace where they're coming from."
+
+    - level: 2
+      trigger_condition: "no_progress_minutes >= 60"
+      content: "The order service is creating duplicates because its idempotency cache is failing. Why would cached keys disappear?"
+
+    - level: 3
+      trigger_condition: "no_progress_minutes >= 90"
+      content: "Redis is under memory pressure and evicting keys. But what's filling it up? Run: redis-cli --scan --pattern '*' | cut -d: -f1 | sort | uniq -c | sort -rn"
+
+    - level: 4
+      trigger_condition: "no_progress_minutes >= 120"
+      content: "The payment service is flooding Redis with keys. But check Sentry - it has NO errors. Why would a service create many keys without errors? Check its connection handling."
+
+environment:
+  services:
+    - name: "payment-service"
+      language: "python"
+      key_files:
+        - "handlers/checkout.py"  # Contains the bug
+        - "db/pool.py"
+
+    - name: "order-service"
+      language: "python"
+      key_files:
+        - "handlers/create_order.py"
+        - "cache/idempotency.py"
+
+    - name: "fraud-service"
+      language: "python"
+      key_files:
+        - "rules/duplicate_charge.py"
+
+    - name: "redis"
+      config:
+        maxmemory: "512mb"
+        maxmemory-policy: "allkeys-lru"
+
+    - name: "postgres"
+      tables:
+        - "orders"
+        - "charges"
+        - "accounts"
+
+related_incidents:
+  - url: "https://medium.com/@ngungabn03/postmortem-database-connection-pool-exhaustion-9afd33a45311"
+    title: "Database connection pool exhaustion postmortem"
+    relevance: "Real-world connection leak causing cascading failures"
+
+  - url: "https://blog.cloudflare.com/details-of-the-cloudflare-outage-on-july-2-2019/"
+    title: "Cloudflare outage July 2019"
+    relevance: "Cascading failure from single component affecting entire system"
+
+tags:
+  - "cascading-failure"
+  - "connection-leak"
+  - "redis-eviction"
+  - "idempotency"
+  - "fraud-detection"
+  - "7-hop"
+  - "significant-silence"
+  - "resource-exhaustion"

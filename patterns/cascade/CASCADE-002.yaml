@@ -1,0 +1,272 @@
+id: CASCADE-002
+version: "2.0"
+name: "Schema migration lock -> validation bypass -> silent data truncation -> report discrepancy"
+category: "Cascading Failures"
+subcategory: "Data Integrity Chains"
+
+sdlc_phases:
+  primary: "Debugging"
+  secondary: ["Maintenance", "Deployment"]
+
+description: |
+  A 6-hop cascading failure where a long-running database migration holds a table lock.
+  The application's retry-and-continue error handling masks validation failures.
+  Invalid data gets written with silent truncation, propagating through the pipeline
+  to cause billing report discrepancies discovered weeks later.
+
+  The agent sees: "Finance reports revenue $47K lower than expected this quarter."
+  The root cause is: A schema migration that held locks too long, 6 hops away.
+
+  Critical insight: The migration completed "successfully" 3 weeks ago. Nothing in
+  recent changes explains the issue. The temporal gap makes this extremely hard.
+
+causal_chain:
+  - hop: 1
+    component: "database-migration"
+    failure: "ALTER TABLE holds AccessExclusiveLock for 47 minutes"
+    boundary_type: "temporal"
+    evidence_difficulty: "very_hard"
+    evidence_location: "migration_logs_3_weeks_ago"
+    temporal_gap: "3 weeks"
+
+  - hop: 2
+    component: "api-service"
+    failure: "Lock timeout causes write failures, retry-and-continue masks errors"
+    boundary_type: "code"
+    evidence_difficulty: "hard"
+    evidence_location: "application_logs_3_weeks_ago"
+
+  - hop: 3
+    component: "api-service"
+    failure: "Validation bypass on retry allows malformed transaction amounts"
+    boundary_type: "code"
+    evidence_difficulty: "hard"
+    evidence_location: "source_code"
+
+  - hop: 4
+    component: "database"
+    failure: "DECIMAL(10,2) silently truncates large amounts to fit"
+    boundary_type: "infrastructure"
+    evidence_difficulty: "medium"
+    evidence_location: "database_schema"
+
+  - hop: 5
+    component: "etl-pipeline"
+    failure: "Aggregates corrupted transaction data without validation"
+    boundary_type: "service"
+    evidence_difficulty: "medium"
+    evidence_location: "data_warehouse"
+
+  - hop: 6
+    component: "finance-reports"
+    failure: "Revenue totals are $47K lower than payment processor reports"
+    boundary_type: "business_logic"
+    evidence_difficulty: "easy"
+    evidence_location: "reports, slack"
+
+task_prompt: |
+  Finance has escalated an urgent issue: Q4 revenue reports show $47,283 less
+  than what Stripe reports we collected. The discrepancy was discovered during
+  the quarterly audit yesterday.
+
+  The finance team has triple-checked their calculations. "The numbers just
+  don't add up. We've never had a discrepancy this large."
+
+  Investigate the source of this discrepancy and determine if we have a
+  data integrity issue.
+
+requirements:
+  languages: ["python", "typescript", "java"]
+  patterns:
+    - "database_migration"
+    - "retry_logic"
+    - "validation"
+    - "etl_pipeline"
+  infrastructure:
+    - "postgres"
+    - "data_warehouse"
+  min_services: 3
+
+evidence_map:
+  - hop: 6
+    source: "reports"
+    tool: "Read finance_report_q4.csv"
+    evidence: "Internal revenue: $2,847,293. Stripe dashboard: $2,894,576. Delta: -$47,283"
+    reveals: "Discrepancy is real and significant"
+    points_toward: "Where in our pipeline is money going missing?"
+
+  - hop: 5
+    source: "data_warehouse"
+    tool: "bash: psql warehouse -c 'SELECT SUM(amount) FROM fact_transactions WHERE quarter=4'"
+    evidence: "Sum matches internal report, not Stripe"
+    reveals: "Data warehouse has the incorrect data"
+    points_toward: "When did bad data enter the warehouse?"
+
+  - hop: 4
+    source: "database"
+    tool: "bash: psql -c 'SELECT * FROM transactions WHERE amount != original_amount LIMIT 10'"
+    evidence: "327 transactions where amount < original_amount"
+    reveals: "Data was modified/truncated during storage"
+    key_insight: "Check the column type and constraints"
+
+  - hop: 4
+    source: "schema"
+    tool: "bash: psql -c '\\d transactions'"
+    evidence: "amount DECIMAL(10,2) -- changed 3 weeks ago"
+    reveals: "Column precision was reduced in recent migration"
+
+  - hop: 3
+    source: "source_code"
+    tool: "Read api-service/handlers/transactions.py"
+    evidence: |
+      try:
+          validate_amount(amount)
+          save_transaction(amount)
+      except ValidationError:
+          # Retry without validation on transient errors
+          save_transaction_raw(amount)  # BUG: bypasses validation
+    reveals: "Retry path bypasses amount validation"
+
+  - hop: 2
+    source: "logs_historical"
+    tool: "bash: zcat /var/log/api-service/app.log.3.gz | grep 'validation.*retry'"
+    evidence: "Spike of 'retrying without validation' on Nov 15"
+    reveals: "Many transactions bypassed validation 3 weeks ago"
+    temporal_clue: "Nov 15 = day of the migration"
+
+  - hop: 1
+    source: "migration_logs"
+    tool: "bash: cat /var/log/migrations/20241115_alter_transactions.log"
+    evidence: "Migration started 02:15, completed 03:02 (47 minutes lock held)"
+    reveals: "Long-running migration caused lock timeouts"
+    root_cause: "ALTER TABLE held lock, causing write retries that bypassed validation"
+
+red_herrings:
+  - source: "slack"
+    message: "Could Stripe have a bug in their dashboard?"
+    why_wrong: "Stripe's numbers match payment processor bank settlement"
+
+  - source: "recent_deploys"
+    message: "We deployed a pricing change last week"
+    why_wrong: "Pricing change affects future transactions, not historical"
+
+  - source: "etl_logs"
+    message: "ETL job failed once on Nov 20"
+    why_wrong: "Job was re-run successfully; no data loss"
+
+shallow_fixes:
+  - fix: "Manually adjust the report numbers"
+    why_fails: "Doesn't fix corrupted source data; future reports will be wrong"
+    detection: "Report file edited without code changes"
+
+  - fix: "Add validation to ETL pipeline"
+    why_fails: "Data is already corrupted in source; validation won't recover it"
+    detection: "ETL changes without fixing API or recovering data"
+
+difficulty:
+  estimated_human_time_hours: 5
+  frontier_model_pass_rate_percent: 15
+  hop_count: 6
+  complexity_factors:
+    - "3-week temporal gap between cause and symptom"
+    - "Migration 'succeeded' - no obvious failure"
+    - "Requires correlating events across time"
+    - "Silent data truncation leaves no error trail"
+    - "Business/financial domain knowledge needed"
+
+failure_modes:
+  common:
+    - mode: "Blame Stripe"
+      description: "Assumes external provider has the bug"
+      detection: "Opens ticket with Stripe without internal investigation"
+      hop_reached: 6
+
+    - mode: "Fix ETL only"
+      description: "Adds validation to ETL without tracing upstream"
+      detection: "ETL changes without API or migration investigation"
+      hop_reached: 5
+
+    - mode: "Miss temporal correlation"
+      description: "Doesn't connect Nov 15 events to current issue"
+      detection: "Doesn't examine historical logs"
+      hop_reached: 3
+
+golden_path:
+  steps:
+    - step: 1
+      action: "Verify the discrepancy is real"
+      tools: ["Compare internal vs Stripe reports"]
+      evidence: "$47K difference confirmed"
+      hop: 6
+
+    - step: 2
+      action: "Find when bad data entered the system"
+      tools: ["Query warehouse for anomalies by date"]
+      evidence: "Spike of low-value transactions on Nov 15"
+      hop: 5
+
+    - step: 3
+      action: "Examine source transactions"
+      tools: ["Query transactions table for truncated amounts"]
+      evidence: "327 transactions with amount < original_amount"
+      hop: 4
+
+    - step: 4
+      action: "Check for schema changes around Nov 15"
+      tools: ["Review migration history"]
+      evidence: "Migration changed amount from DECIMAL(15,2) to DECIMAL(10,2)"
+      hop: 4
+
+    - step: 5
+      action: "Understand why truncation occurred silently"
+      tools: ["Read API error handling code"]
+      evidence: "Retry path bypasses validation"
+      hop: 3
+
+    - step: 6
+      action: "Correlate API errors with migration"
+      tools: ["grep historical logs for Nov 15"]
+      evidence: "Lock timeouts triggered validation bypass"
+      hop: 2
+
+    - step: 7
+      action: "Confirm root cause"
+      tools: ["Read migration logs"]
+      evidence: "47-minute lock caused cascading failures"
+      hop: 1
+
+    - step: 8
+      action: "Remediate"
+      tools: ["Restore data from Stripe API, fix retry logic, plan migration rollback"]
+      verification: "Revenue reconciles after data recovery"
+
+grading:
+  understanding:
+    - criterion: "Connected discrepancy to truncated transactions"
+      weight: 0.15
+    - criterion: "Identified schema change as truncation cause"
+      weight: 0.15
+    - criterion: "Found retry-bypass validation bug"
+      weight: 0.10
+    - criterion: "Traced to migration lock timeout"
+      weight: 0.10
+
+  outcome_based:
+    - criterion: "Identified all 327 affected transactions"
+      weight: 0.15
+    - criterion: "Proposed data recovery plan"
+      weight: 0.10
+    - criterion: "Fixed validation bypass bug"
+      weight: 0.10
+
+  communication:
+    - criterion: "Incident report explains full timeline"
+      weight: 0.15
+
+tags:
+  - "cascading-failure"
+  - "data-integrity"
+  - "schema-migration"
+  - "silent-truncation"
+  - "temporal-gap"
+  - "6-hop"

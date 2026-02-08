@@ -1,0 +1,337 @@
+id: CASCADE-005
+version: "2.0"
+name: "Poison message -> consumer crash loop -> DLQ overflow -> backpressure -> upstream timeout cascade"
+category: "Cascading Failures"
+subcategory: "Message Queue Chains"
+
+sdlc_phases:
+  primary: "Debugging"
+  secondary: ["Maintenance", "Verification"]
+
+description: |
+  An 8-hop cascading failure originating from a single malformed message. A protobuf
+  field type change causes deserialization failures in the order-processor consumer.
+  The consumer crashes, restarts, hits the same message, crashes again (poison pill).
+  Dead letter queue fills up, triggers backpressure. Producer service can't publish,
+  starts timing out. Upstream services queue requests, eventually exhausting memory.
+  Users see checkout hanging indefinitely.
+
+  The agent sees: "Checkout hangs forever, then times out after 30 seconds"
+  The root cause is: A protobuf schema mismatch from 3 days ago, 8 hops away.
+
+  Critical insight: The poison message is invisible to most observability. The
+  consumer restarts look like "normal churn." The real signal is message age.
+
+causal_chain:
+  - hop: 1
+    component: "protobuf-schema"
+    failure: "Field changed from int32 to int64 without consumer update"
+    boundary_type: "contract"
+    evidence_difficulty: "very_hard"
+    evidence_location: "git_history"
+    temporal_gap: "3 days"
+
+  - hop: 2
+    component: "order-events"
+    failure: "Message published with int64 orderId, consumer expects int32"
+    boundary_type: "data"
+    evidence_difficulty: "hard"
+    evidence_location: "message_content"
+
+  - hop: 3
+    component: "order-processor"
+    failure: "Deserialization throws, consumer crashes, restarts, hits same message"
+    boundary_type: "service"
+    evidence_difficulty: "hard"
+    evidence_location: "consumer_crash_logs"
+
+  - hop: 4
+    component: "message-queue"
+    failure: "Message redelivered repeatedly, eventually moves to DLQ"
+    boundary_type: "infrastructure"
+    evidence_difficulty: "medium"
+    evidence_location: "dlq_metrics"
+
+  - hop: 5
+    component: "dlq"
+    failure: "DLQ fills to capacity (10,000 messages)"
+    boundary_type: "infrastructure"
+    evidence_difficulty: "medium"
+    evidence_location: "queue_metrics"
+
+  - hop: 6
+    component: "message-queue"
+    failure: "Backpressure triggers, producer publish calls block"
+    boundary_type: "infrastructure"
+    evidence_difficulty: "medium"
+    evidence_location: "producer_logs"
+
+  - hop: 7
+    component: "checkout-service"
+    failure: "Publish to queue blocks, request handler times out"
+    boundary_type: "service"
+    evidence_difficulty: "easy"
+    evidence_location: "sentry"
+
+  - hop: 8
+    component: "user-checkout"
+    failure: "Checkout hangs for 30s, then shows timeout error"
+    boundary_type: "user_facing"
+    evidence_difficulty: "easy"
+    evidence_location: "support"
+
+task_prompt: |
+  Users are reporting that checkout "hangs forever" - the page just spins with
+  no feedback, then times out after about 30 seconds.
+
+  The issue started around 3 days ago but reports have increased significantly
+  today. Some checkouts succeed (about 40%), but most hang and timeout.
+
+  Monitoring shows:
+  - Checkout service latency P99: 30,000ms (was 200ms)
+  - Checkout success rate: 41%
+  - No obvious errors in checkout service logs
+
+  The checkout service team says "nothing changed on our end."
+
+  Investigate and resolve the checkout hang issue.
+
+requirements:
+  languages: ["python", "go", "java", "typescript"]
+  patterns:
+    - "message_queue"
+    - "protobuf"
+    - "consumer"
+    - "dead_letter_queue"
+  infrastructure:
+    - "rabbitmq"
+    - "kafka"
+    - "sqs"
+  min_services: 4
+
+evidence_map:
+  - hop: 8
+    source: "support"
+    tool: "slack_get_messages('#support')"
+    evidence: "Checkout spins forever, times out at 30s"
+    reveals: "Checkout is blocking, not failing fast"
+
+  - hop: 7
+    source: "sentry"
+    tool: "sentry_list_issues(project='checkout-service')"
+    evidence: "TimeoutError: Message publish timed out after 30000ms"
+    reveals: "Publishing to message queue is blocking"
+    points_toward: "Why is message queue blocking publishes?"
+
+  - hop: 7
+    source: "logs"
+    tool: "bash: grep 'publish' /var/log/checkout-service/app.log | tail -20"
+    evidence: "'waiting for queue capacity', 'publish blocked by backpressure'"
+    reveals: "Queue has backpressure enabled, blocking producers"
+
+  - hop: 6
+    source: "queue_admin"
+    tool: "bash: rabbitmqctl list_queues name messages consumers"
+    evidence: "order-events-dlq: 10000 messages, 0 consumers"
+    reveals: "Dead letter queue is full at capacity"
+    points_toward: "Why is DLQ filling up?"
+
+  - hop: 5
+    source: "metrics"
+    tool: "prometheus_query('rabbitmq_queue_messages{queue=\"order-events-dlq\"}')"
+    evidence: "DLQ grew from 0 to 10,000 over 3 days"
+    reveals: "Steady stream of messages being dead-lettered"
+
+  - hop: 4
+    source: "queue_admin"
+    tool: "bash: rabbitmqctl list_queues name messages message_stats"
+    evidence: "order-events: 0 messages, redeliver_rate=47/s"
+    reveals: "Messages are being redelivered repeatedly"
+    key_insight: "High redeliver rate means consumer is failing to process"
+
+  - hop: 3
+    source: "logs"
+    tool: "bash: grep -i 'error\\|exception' /var/log/order-processor/app.log | tail -50"
+    evidence: "DecodeError: Field orderId expected int32, got int64"
+    reveals: "Protobuf deserialization failing"
+    points_toward: "Schema mismatch between producer and consumer"
+
+  - hop: 3
+    source: "kubernetes"
+    tool: "bash: kubectl get pods -l app=order-processor --watch"
+    evidence: "order-processor-xxx: CrashLoopBackOff, restarted 847 times"
+    reveals: "Consumer is in crash loop"
+    red_herring_potential: "Looks like 'normal' restart churn at first"
+
+  - hop: 2
+    source: "message_content"
+    tool: "bash: rabbitmqctl peek order-events-dlq 1 | protoc --decode=OrderEvent"
+    evidence: "orderId: 9223372036854775807 (larger than int32 max)"
+    reveals: "Message contains int64 value in orderId field"
+
+  - hop: 1
+    source: "git"
+    tool: "bash: git log -p --since='5 days ago' -- '**/order_events.proto'"
+    evidence: |
+      -  int32 order_id = 1;
+      +  int64 order_id = 1;  // Changed for large order IDs
+    reveals: "Schema changed 3 days ago, consumer not updated"
+    root_cause: "Breaking schema change deployed to producer only"
+
+red_herrings:
+  - source: "metrics"
+    message: "Checkout service memory usage increased"
+    why_wrong: "Memory increase is from queued requests, not the cause"
+
+  - source: "slack"
+    message: "Maybe the queue server is overloaded?"
+    why_wrong: "Queue server is healthy; backpressure is intentional"
+
+  - source: "recent_deploy"
+    message: "Payment service was deployed yesterday"
+    why_wrong: "Payment service is downstream, not on the critical path"
+
+  - source: "consumer_restarts"
+    message: "Consumer restarts look normal - they restart occasionally"
+    why_wrong: "847 restarts in 3 days is NOT normal; it's a crash loop"
+
+shallow_fixes:
+  - fix: "Increase queue capacity"
+    why_fails: "DLQ will still fill; poison message blocks processing"
+    detection: "Queue config changes without consumer fix"
+
+  - fix: "Clear the DLQ"
+    why_fails: "DLQ will fill again from new poison messages"
+    detection: "rabbitmqctl purge without code fix"
+
+  - fix: "Disable backpressure"
+    why_fails: "Will cause producer memory exhaustion instead"
+    detection: "Backpressure config disabled"
+
+  - fix: "Skip malformed messages"
+    why_fails: "Partial fix; doesn't address schema mismatch"
+    detection: "try/except around decode without schema update"
+
+difficulty:
+  estimated_human_time_hours: 6
+  frontier_model_pass_rate_percent: 10
+  hop_count: 8
+  complexity_factors:
+    - "8 hops from symptom to root cause"
+    - "Consumer restarts look like 'normal churn'"
+    - "Poison message is invisible without deep queue inspection"
+    - "Schema change was 3 days ago (temporal gap)"
+    - "41% success rate makes it seem 'partially working'"
+    - "Requires understanding message queue internals"
+
+failure_modes:
+  common:
+    - mode: "Blame checkout service"
+      description: "Focuses on checkout service code without tracing to queue"
+      detection: "Extended checkout-service debugging"
+      hop_reached: 7
+
+    - mode: "Clear DLQ and call it fixed"
+      description: "Purges DLQ without finding why it filled"
+      detection: "rabbitmqctl purge without root cause"
+      hop_reached: 5
+
+    - mode: "Increase timeouts"
+      description: "Increases checkout timeout from 30s to 60s"
+      detection: "Timeout config changes"
+      hop_reached: 7
+
+  subtle:
+    - mode: "Find crash loop but blame OOM"
+      description: "Sees consumer crashing, assumes memory issue"
+      detection: "Memory limit increases without log analysis"
+      hop_reached: 3
+
+    - mode: "Find decode error but wrong fix"
+      description: "Adds try/except around decode instead of fixing schema"
+      detection: "Exception handling without schema update"
+      hop_reached: 3
+
+golden_path:
+  steps:
+    - step: 1
+      action: "Identify checkout is blocking on publish"
+      tools: ["sentry", "checkout logs"]
+      evidence: "Publish timeout, backpressure blocking"
+      hop: 7-8
+
+    - step: 2
+      action: "Check message queue state"
+      tools: ["rabbitmqctl list_queues"]
+      evidence: "DLQ at capacity (10,000)"
+      hop: 5-6
+
+    - step: 3
+      action: "Find what's filling the DLQ"
+      tools: ["queue metrics", "redeliver rate"]
+      evidence: "High redeliver rate on order-events"
+      hop: 4
+
+    - step: 4
+      action: "Check consumer status"
+      tools: ["kubectl get pods"]
+      evidence: "CrashLoopBackOff, 847 restarts"
+      key_insight: "This is NOT normal churn"
+      hop: 3
+
+    - step: 5
+      action: "Find crash cause"
+      tools: ["consumer logs"]
+      evidence: "DecodeError: orderId expected int32, got int64"
+      hop: 3
+
+    - step: 6
+      action: "Examine a DLQ message"
+      tools: ["rabbitmqctl peek", "protoc decode"]
+      evidence: "Message has orderId larger than int32 max"
+      hop: 2
+
+    - step: 7
+      action: "Find schema change"
+      tools: ["git log on proto files"]
+      evidence: "int32 -> int64 change 3 days ago"
+      hop: 1
+
+    - step: 8
+      action: "Fix consumer and recover"
+      tools: ["Update consumer proto", "replay DLQ"]
+      verification: "Consumer processes messages, checkout succeeds"
+
+grading:
+  understanding:
+    - criterion: "Traced timeout to backpressure"
+      weight: 0.10
+    - criterion: "Identified DLQ overflow"
+      weight: 0.10
+    - criterion: "Found consumer crash loop"
+      weight: 0.10
+    - criterion: "Identified protobuf decode error"
+      weight: 0.10
+    - criterion: "Found schema mismatch in git history"
+      weight: 0.10
+
+  outcome_based:
+    - criterion: "Updated consumer protobuf schema"
+      weight: 0.15
+    - criterion: "Consumer processing successfully"
+      weight: 0.10
+    - criterion: "DLQ messages replayed"
+      weight: 0.10
+
+  communication:
+    - criterion: "Incident report recommends schema versioning strategy"
+      weight: 0.15
+
+tags:
+  - "cascading-failure"
+  - "message-queue"
+  - "poison-message"
+  - "protobuf"
+  - "schema-mismatch"
+  - "backpressure"
+  - "8-hop"

@@ -1,0 +1,300 @@
+id: CASCADE-004
+version: "2.0"
+name: "Terraform state drift -> next apply destroys RDS -> service data loss -> cascading auth failures"
+category: "Cascading Failures"
+subcategory: "Infrastructure as Code Chains"
+
+sdlc_phases:
+  primary: "Debugging"
+  secondary: ["Deployment", "Maintenance"]
+
+description: |
+  A 7-hop cascading failure originating from infrastructure state drift. A manual
+  hotfix to RDS (increased max_connections) wasn't reflected in Terraform state.
+  The next terraform apply "corrected" the drift by recreating the RDS instance,
+  destroying the user database. Auth service loses its backing store, causing
+  cascading authentication failures across all dependent services.
+
+  The agent sees: "All users logged out and can't log back in"
+  The root cause is: Manual RDS change not in Terraform, 7 hops away.
+
+  Critical insight: The terraform apply output said "1 to destroy, 1 to create"
+  but nobody read it carefully. The change looked routine.
+
+causal_chain:
+  - hop: 1
+    component: "manual-hotfix"
+    failure: "SRE increased max_connections via AWS console, bypassing Terraform"
+    boundary_type: "process"
+    evidence_difficulty: "very_hard"
+    evidence_location: "cloudtrail_logs_2_weeks_ago"
+    temporal_gap: "2 weeks"
+
+  - hop: 2
+    component: "terraform-state"
+    failure: "State drift: Terraform thinks max_connections should be 100, AWS has 200"
+    boundary_type: "infrastructure"
+    evidence_difficulty: "hard"
+    evidence_location: "terraform_plan_output"
+
+  - hop: 3
+    component: "terraform-apply"
+    failure: "'1 to destroy, 1 to create' for RDS during unrelated deploy"
+    boundary_type: "deployment"
+    evidence_difficulty: "hard"
+    evidence_location: "cicd_logs"
+
+  - hop: 4
+    component: "rds-instance"
+    failure: "Database instance recreated, all data lost (no snapshot taken)"
+    boundary_type: "data"
+    evidence_difficulty: "medium"
+    evidence_location: "rds_events"
+
+  - hop: 5
+    component: "auth-service"
+    failure: "Cannot connect to database, all auth operations fail"
+    boundary_type: "service"
+    evidence_difficulty: "medium"
+    evidence_location: "sentry"
+
+  - hop: 6
+    component: "all-services"
+    failure: "Services depending on auth fail to validate tokens"
+    boundary_type: "service"
+    evidence_difficulty: "easy"
+    evidence_location: "sentry, logs"
+
+  - hop: 7
+    component: "users"
+    failure: "All users logged out, login fails with 'invalid credentials'"
+    boundary_type: "user_facing"
+    evidence_difficulty: "easy"
+    evidence_location: "support, slack"
+
+task_prompt: |
+  INCIDENT: Complete authentication outage
+
+  At 14:32 today, all users were simultaneously logged out. Attempting to log in
+  returns "Invalid credentials" even with correct passwords.
+
+  Impact: 100% of users affected. All services requiring authentication are down.
+
+  Timeline from #incidents:
+  - 14:30: Routine deployment started (unrelated feature)
+  - 14:32: First reports of logouts
+  - 14:35: All dashboards showing auth failures
+
+  The deployment was "just a UI change" and was rolled back, but the issue persists.
+
+  Priority: P0. Find root cause and restore authentication.
+
+requirements:
+  languages: ["python", "go", "typescript"]
+  patterns:
+    - "terraform"
+    - "infrastructure_as_code"
+    - "database"
+    - "authentication"
+  infrastructure:
+    - "aws"
+    - "rds"
+    - "terraform"
+  min_services: 3
+
+evidence_map:
+  - hop: 7
+    source: "support"
+    tool: "slack_get_messages('#incidents')"
+    evidence: "All users logged out simultaneously at 14:32"
+    reveals: "Mass logout event, not individual account issues"
+
+  - hop: 6
+    source: "sentry"
+    tool: "sentry_list_issues()"
+    evidence: "Multiple services: 'AuthServiceUnavailable', 'TokenValidationFailed'"
+    reveals: "Auth service is the common dependency"
+
+  - hop: 5
+    source: "sentry"
+    tool: "sentry_get_issue(project='auth-service')"
+    evidence: "DatabaseConnectionError: Connection refused to auth-db.xxxxx.rds.amazonaws.com"
+    reveals: "Auth service cannot connect to its database"
+    points_toward: "Check database status"
+
+  - hop: 4
+    source: "aws"
+    tool: "bash: aws rds describe-db-instances --db-instance-identifier auth-db"
+    evidence: "DBInstanceStatus: 'available', CreatedTime: '2024-11-28T14:31:00Z' (TODAY)"
+    reveals: "Database was recreated today at 14:31"
+    key_insight: "DB is brand new - where's the data?"
+
+  - hop: 4
+    source: "aws"
+    tool: "bash: aws rds describe-events --source-identifier auth-db"
+    evidence: "'DB instance deleted' at 14:30, 'DB instance created' at 14:31"
+    reveals: "Database was deleted and recreated during deploy"
+
+  - hop: 3
+    source: "cicd"
+    tool: "Read cicd/deploy_14-30.log"
+    evidence: |
+      terraform apply output:
+      # aws_db_instance.auth_db will be destroyed
+      # aws_db_instance.auth_db will be created
+      Plan: 1 to add, 0 to change, 1 to destroy.
+      Apply complete! Resources: 1 added, 0 changed, 1 destroyed.
+    reveals: "Terraform destroyed and recreated the RDS instance"
+    key_insight: "Someone approved '1 to destroy' without checking what"
+
+  - hop: 2
+    source: "terraform"
+    tool: "bash: terraform plan -target=aws_db_instance.auth_db 2>&1"
+    evidence: |
+      # aws_db_instance.auth_db must be replaced
+      -/+ resource "aws_db_instance" "auth_db" {
+        ~ max_connections = 200 -> 100 # forces replacement
+    reveals: "max_connections change triggers replacement"
+    key_insight: "Drift between state (100) and actual (200)"
+
+  - hop: 1
+    source: "cloudtrail"
+    tool: "bash: aws cloudtrail lookup-events --lookup-attributes AttributeKey=ResourceName,AttributeValue=auth-db --max-results 50"
+    evidence: "'ModifyDBInstance' by user 'oncall-sre' 2 weeks ago: max_connections 100->200"
+    reveals: "Manual console change 2 weeks ago caused the drift"
+    root_cause: "Hotfix bypassed IaC, wasn't recorded in Terraform"
+
+red_herrings:
+  - source: "slack"
+    message: "The UI deploy must have broken something"
+    why_wrong: "UI deploy was unrelated; rollback didn't help because DB is gone"
+
+  - source: "metrics"
+    message: "Auth service memory usage spiked before the outage"
+    why_wrong: "Spike was from reconnection attempts, not the cause"
+
+  - source: "recent_pr"
+    title: "Update auth service dependencies"
+    why_wrong: "Dependency update was deployed last week, worked fine"
+
+shallow_fixes:
+  - fix: "Rollback the UI deployment"
+    why_fails: "UI change was unrelated; database is still empty"
+    detection: "Git revert of UI PR"
+
+  - fix: "Restart auth service"
+    why_fails: "Database is empty; service will start but auth will fail"
+    detection: "Service restart without DB recovery"
+
+  - fix: "Create new database"
+    why_fails: "New empty DB won't have user data; need restore from backup"
+    detection: "terraform apply without snapshot restore"
+
+difficulty:
+  estimated_human_time_hours: 4
+  frontier_model_pass_rate_percent: 18
+  hop_count: 7
+  complexity_factors:
+    - "Manual change 2 weeks ago is root cause"
+    - "Terraform 'succeeded' but destroyed data"
+    - "'1 to destroy' was approved without scrutiny"
+    - "UI deploy red herring is very compelling"
+    - "Requires understanding IaC state management"
+
+failure_modes:
+  common:
+    - mode: "Blame UI deploy"
+      description: "Focuses on rolled-back UI change"
+      detection: "Extended investigation of UI PR"
+      hop_reached: 7
+
+    - mode: "Just restart services"
+      description: "Tries restarting auth service repeatedly"
+      detection: "Multiple restart commands without DB check"
+      hop_reached: 6
+
+    - mode: "Recreate without backup"
+      description: "Runs terraform apply again, creating empty DB"
+      detection: "terraform apply without snapshot restore"
+      hop_reached: 4
+
+  subtle:
+    - mode: "Find recreation but not cause"
+      description: "Sees DB was recreated but doesn't find drift cause"
+      detection: "Restores backup but doesn't fix Terraform state"
+      hop_reached: 3
+
+golden_path:
+  steps:
+    - step: 1
+      action: "Identify auth service as the failing dependency"
+      tools: ["sentry", "service dependency map"]
+      evidence: "All services failing on auth operations"
+      hop: 6-7
+
+    - step: 2
+      action: "Check auth service error"
+      tools: ["sentry_get_issue()"]
+      evidence: "DatabaseConnectionError to RDS"
+      hop: 5
+
+    - step: 3
+      action: "Check RDS instance status"
+      tools: ["aws rds describe-db-instances"]
+      evidence: "Instance created TODAY at 14:31"
+      key_insight: "Database was recreated, data is gone"
+      hop: 4
+
+    - step: 4
+      action: "Find what recreated the database"
+      tools: ["CI/CD logs"]
+      evidence: "terraform apply destroyed and created RDS"
+      hop: 3
+
+    - step: 5
+      action: "Understand why Terraform wanted to recreate"
+      tools: ["terraform plan"]
+      evidence: "max_connections drift triggers replacement"
+      hop: 2
+
+    - step: 6
+      action: "Find source of drift"
+      tools: ["AWS CloudTrail"]
+      evidence: "Manual console change 2 weeks ago"
+      hop: 1
+
+    - step: 7
+      action: "Restore and prevent recurrence"
+      tools: ["aws rds restore-from-snapshot", "update terraform state"]
+      verification: "Auth restored from backup, state synced"
+
+grading:
+  understanding:
+    - criterion: "Identified database recreation as cause"
+      weight: 0.15
+    - criterion: "Found terraform destroy in CI logs"
+      weight: 0.10
+    - criterion: "Identified state drift from manual change"
+      weight: 0.15
+    - criterion: "Found CloudTrail evidence of console change"
+      weight: 0.10
+
+  outcome_based:
+    - criterion: "Restored database from backup"
+      weight: 0.20
+    - criterion: "Auth service operational"
+      weight: 0.10
+    - criterion: "Terraform state synced with reality"
+      weight: 0.10
+
+  communication:
+    - criterion: "Incident report recommends IaC process improvements"
+      weight: 0.10
+
+tags:
+  - "cascading-failure"
+  - "terraform"
+  - "state-drift"
+  - "data-loss"
+  - "infrastructure-as-code"
+  - "7-hop"

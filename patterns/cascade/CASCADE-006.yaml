@@ -1,0 +1,394 @@
+id: CASCADE-006
+version: "2.0"
+name: "GC pause -> batch job timeout -> partial export -> invoice mismatch -> customer chargeback cascade"
+category: "Cascading Failures"
+subcategory: "Business Logic Chains"
+
+sdlc_phases:
+  primary: "Debugging"
+  secondary: ["Maintenance", "Verification"]
+
+description: |
+  A 9-hop cascading failure originating from JVM garbage collection. A memory leak
+  in the nightly export job causes increasingly long GC pauses. Eventually, GC pause
+  exceeds the 5-minute Kubernetes liveness probe, causing the job to be killed.
+  The job's partial export is treated as complete by downstream systems. Invoicing
+  runs on incomplete data, generating incorrect bills. Customers receive wrong
+  invoices, some initiate chargebacks. The payment processor flags the merchant
+  account for high chargeback ratio.
+
+  The agent sees: "Stripe has frozen our merchant account due to chargeback rate"
+  The root cause is: A memory leak in the export job, 9 hops away.
+
+  Critical insight: The batch job has been "succeeding" for 3 months. It's actually
+  been leaking memory slowly, with increasing GC pauses. The kill happened silently
+  because the job exit code was 0 (SIGTERM is graceful).
+
+causal_chain:
+  - hop: 1
+    component: "export-job"
+    failure: "Memory leak: Large object held past processing, not GC'd"
+    boundary_type: "code"
+    evidence_difficulty: "very_hard"
+    evidence_location: "heap_dump"
+    temporal_buildup: "3 months"
+
+  - hop: 2
+    component: "jvm"
+    failure: "GC pauses growing: 10ms -> 100ms -> 1s -> 4min over 3 months"
+    boundary_type: "runtime"
+    evidence_difficulty: "hard"
+    evidence_location: "gc_logs"
+
+  - hop: 3
+    component: "kubernetes"
+    failure: "Liveness probe fails during 4min GC pause, pod killed"
+    boundary_type: "infrastructure"
+    evidence_difficulty: "hard"
+    evidence_location: "k8s_events"
+
+  - hop: 4
+    component: "export-job"
+    failure: "SIGTERM received, job exits with code 0 (graceful), partial export"
+    boundary_type: "code"
+    evidence_difficulty: "hard"
+    evidence_location: "job_logs"
+    significant_silence: true  # Exit code 0 = success
+
+  - hop: 5
+    component: "export-file"
+    failure: "Export file written with 847 of 12,439 transactions"
+    boundary_type: "data"
+    evidence_difficulty: "medium"
+    evidence_location: "file_comparison"
+
+  - hop: 6
+    component: "invoicing-service"
+    failure: "Processes partial export as if complete, generates wrong invoices"
+    boundary_type: "service"
+    evidence_difficulty: "medium"
+    evidence_location: "invoicing_logs"
+
+  - hop: 7
+    component: "customers"
+    failure: "Customers receive incorrect invoices, some undercharged, some overcharged"
+    boundary_type: "business"
+    evidence_difficulty: "easy"
+    evidence_location: "support_tickets"
+
+  - hop: 8
+    component: "chargebacks"
+    failure: "Overcharged customers dispute charges, initiate chargebacks"
+    boundary_type: "business"
+    evidence_difficulty: "easy"
+    evidence_location: "stripe_dashboard"
+
+  - hop: 9
+    component: "merchant-account"
+    failure: "Chargeback rate exceeds 1%, Stripe freezes merchant account"
+    boundary_type: "business"
+    evidence_difficulty: "easy"
+    evidence_location: "stripe_email"
+
+task_prompt: |
+  CRITICAL: Our Stripe merchant account has been frozen.
+
+  We received this email from Stripe this morning:
+  "Your merchant account has been placed under review due to a chargeback rate
+  of 2.3%, which exceeds our threshold of 1%. Payouts have been paused until
+  the issue is resolved."
+
+  Finance says we had 127 chargebacks in the past month (normal is ~5).
+  Customer support says they've been getting complaints about "wrong invoice
+  amounts" for the past 2 weeks.
+
+  We need to:
+  1. Understand why we have so many chargebacks
+  2. Fix the root cause
+  3. Prepare an explanation for Stripe to unfreeze the account
+
+  This is blocking ALL revenue. P0 priority.
+
+requirements:
+  languages: ["java", "kotlin", "scala"]
+  patterns:
+    - "batch_job"
+    - "jvm_gc"
+    - "kubernetes_liveness"
+    - "data_export"
+    - "invoicing"
+  infrastructure:
+    - "kubernetes"
+    - "jvm"
+    - "postgres"
+  min_services: 4
+
+evidence_map:
+  - hop: 9
+    source: "email"
+    tool: "Read stripe_account_review_email.txt"
+    evidence: "Chargeback rate 2.3%, account frozen"
+    reveals: "Chargebacks are the immediate problem"
+    points_toward: "Why are customers disputing charges?"
+
+  - hop: 8
+    source: "stripe"
+    tool: "bash: stripe disputes list --limit 50"
+    evidence: "127 disputes, reason: 'incorrect_charge_amount'"
+    reveals: "Customers say they were charged wrong amounts"
+    points_toward: "Check invoice generation"
+
+  - hop: 7
+    source: "support"
+    tool: "slack_get_messages('#support')"
+    evidence: "'My invoice says $847 but I should only owe $412'"
+    reveals: "Pattern: invoice amounts are wrong"
+    points_toward: "What generates invoices?"
+
+  - hop: 6
+    source: "invoicing"
+    tool: "bash: psql -c 'SELECT * FROM invoices WHERE amount != expected_amount'"
+    evidence: "2,847 invoices with mismatched amounts from Nov export"
+    reveals: "November invoice run used bad data"
+    points_toward: "What data did invoicing use?"
+
+  - hop: 5
+    source: "export_file"
+    tool: "bash: wc -l exports/transactions_20241101.csv"
+    evidence: "847 lines (should be 12,439 based on DB count)"
+    reveals: "Export file is incomplete"
+    key_insight: "Only 6.8% of transactions were exported"
+
+  - hop: 5
+    source: "export_file"
+    tool: "bash: tail -1 exports/transactions_20241101.csv"
+    evidence: "Last line is mid-field, file is truncated"
+    reveals: "Export was interrupted, not completed"
+
+  - hop: 4
+    source: "job_logs"
+    tool: "bash: kubectl logs job/export-20241101 --previous"
+    evidence: "'Received SIGTERM, shutting down gracefully', exit 0"
+    reveals: "Job was killed but exited with success code"
+    key_insight: "Exit 0 hides the fact job didn't complete"
+
+  - hop: 3
+    source: "kubernetes"
+    tool: "bash: kubectl describe job export-20241101"
+    evidence: "'Liveness probe failed: context deadline exceeded'"
+    reveals: "Pod was killed for failing liveness check"
+    points_toward: "Why did liveness fail?"
+
+  - hop: 3
+    source: "k8s_events"
+    tool: "bash: kubectl get events --field-selector involvedObject.name=export-20241101"
+    evidence: "'Container was killed for exceeding liveness probe timeout (5m)'"
+    reveals: "Something made the container unresponsive for >5 minutes"
+
+  - hop: 2
+    source: "gc_logs"
+    tool: "bash: grep 'GC pause' /var/log/export-job/gc.log"
+    evidence: |
+      2024-09-01: GC pause 12ms
+      2024-10-01: GC pause 847ms
+      2024-11-01: GC pause 247,382ms (4.1 minutes)
+    reveals: "GC pauses growing exponentially"
+    key_insight: "4 minute GC pause exceeded 5 minute liveness"
+
+  - hop: 1
+    source: "heap_dump"
+    tool: "bash: jmap -histo /tmp/export-heap.hprof | head -20"
+    evidence: "ArrayList: 2.4GB (holding all processed transactions in memory)"
+    reveals: "Large collection never cleared during processing"
+
+  - hop: 1
+    source: "code"
+    tool: "Read export-job/src/main/java/TransactionExporter.java"
+    evidence: |
+      List<Transaction> processed = new ArrayList<>();
+      for (Transaction tx : transactions) {
+          processed.add(process(tx));  // BUG: list never cleared
+          writer.write(tx);
+      }
+    reveals: "Transactions accumulated in memory, never released"
+    root_cause: "Memory leak in export job"
+
+red_herrings:
+  - source: "slack"
+    message: "Maybe our fraud detection is broken?"
+    why_wrong: "Fraud detection is working; these are legitimate customer disputes"
+
+  - source: "recent_changes"
+    message: "We launched new pricing last month"
+    why_wrong: "New pricing would cause consistent deltas, not random"
+
+  - source: "stripe"
+    message: "Could be Stripe API issues?"
+    why_wrong: "Stripe is working correctly; our data is wrong"
+
+  - source: "job_status"
+    message: "Export job shows 'Completed' status"
+    why_wrong: "Exit code 0 from SIGTERM is not real success"
+
+  - source: "invoicing_code"
+    message: "Recent invoice service refactor"
+    why_wrong: "Invoicing is processing correctly; input data is incomplete"
+
+shallow_fixes:
+  - fix: "Increase liveness probe timeout"
+    why_fails: "GC will keep growing; eventually any timeout is exceeded"
+    detection: "Liveness timeout config change without GC fix"
+
+  - fix: "Re-run invoicing with current data"
+    why_fails: "Need to re-export data first; invoicing will use same bad file"
+    detection: "Invoice regeneration without export fix"
+
+  - fix: "Manually refund affected customers"
+    why_fails: "Addresses symptom, not cause; next month will have same issue"
+    detection: "Stripe refunds without export investigation"
+
+  - fix: "Increase JVM heap size"
+    why_fails: "Leak will eventually fill any heap size"
+    detection: "Memory limit increases without code fix"
+
+difficulty:
+  estimated_human_time_hours: 8
+  frontier_model_pass_rate_percent: 8
+  hop_count: 9
+  complexity_factors:
+    - "9 hops from symptom to root cause"
+    - "3-month gradual degradation"
+    - "Exit code 0 hides job failure"
+    - "Crosses technical/business boundary multiple times"
+    - "Memory leak is invisible without heap analysis"
+    - "GC pause vs liveness probe interaction is subtle"
+    - "Requires JVM internals knowledge"
+
+failure_modes:
+  common:
+    - mode: "Blame Stripe or fraud"
+      description: "Assumes external cause for chargebacks"
+      detection: "Stripe support tickets without internal investigation"
+      hop_reached: 9
+
+    - mode: "Fix invoicing only"
+      description: "Adds validation to invoicing without finding data source"
+      detection: "Invoicing code changes without export investigation"
+      hop_reached: 6
+
+    - mode: "Manual cleanup"
+      description: "Refunds customers without finding root cause"
+      detection: "Batch refunds without technical fix"
+      hop_reached: 8
+
+  subtle:
+    - mode: "Find truncated export but wrong conclusion"
+      description: "Sees partial export but blames disk space or timeout"
+      detection: "Increases job timeout without finding memory leak"
+      hop_reached: 4
+
+    - mode: "Find GC pause but wrong fix"
+      description: "Increases heap or changes GC algorithm"
+      detection: "JVM tuning without fixing leak"
+      hop_reached: 2
+
+golden_path:
+  steps:
+    - step: 1
+      action: "Understand chargeback pattern"
+      tools: ["stripe disputes list"]
+      evidence: "All disputes cite 'incorrect amount'"
+      hop: 8-9
+
+    - step: 2
+      action: "Verify invoices are wrong"
+      tools: ["psql invoice query"]
+      evidence: "2,847 invoices with wrong amounts from November"
+      hop: 7
+
+    - step: 3
+      action: "Trace invoice data source"
+      tools: ["invoicing config"]
+      evidence: "Invoicing uses transactions_20241101.csv"
+      hop: 6
+
+    - step: 4
+      action: "Examine export file"
+      tools: ["wc -l", "tail"]
+      evidence: "Only 847 of 12,439 rows, file truncated"
+      hop: 5
+
+    - step: 5
+      action: "Check export job status"
+      tools: ["kubectl logs job/export"]
+      evidence: "SIGTERM, graceful shutdown, exit 0"
+      key_insight: "Exit 0 is misleading - job was killed"
+      hop: 4
+
+    - step: 6
+      action: "Find why pod was killed"
+      tools: ["kubectl describe job", "k8s events"]
+      evidence: "Liveness probe failed after 5 minutes"
+      hop: 3
+
+    - step: 7
+      action: "Check what blocked the probe"
+      tools: ["gc.log analysis"]
+      evidence: "4.1 minute GC pause"
+      hop: 2
+
+    - step: 8
+      action: "Find memory leak"
+      tools: ["heap dump analysis"]
+      evidence: "2.4GB ArrayList of processed transactions"
+      hop: 1
+
+    - step: 9
+      action: "Fix and recover"
+      tools: [
+        "Fix code to clear list after writing",
+        "Re-run export",
+        "Re-generate invoices",
+        "Issue credits/refunds",
+        "Submit explanation to Stripe"
+      ]
+
+grading:
+  understanding:
+    - criterion: "Traced chargebacks to wrong invoices"
+      weight: 0.08
+    - criterion: "Found incomplete export file"
+      weight: 0.08
+    - criterion: "Identified job was killed (not completed)"
+      weight: 0.10
+    - criterion: "Connected to liveness probe failure"
+      weight: 0.08
+    - criterion: "Found GC pause as liveness failure cause"
+      weight: 0.08
+    - criterion: "Identified memory leak in code"
+      weight: 0.08
+
+  outcome_based:
+    - criterion: "Fixed memory leak"
+      weight: 0.15
+    - criterion: "Re-exported correct data"
+      weight: 0.08
+    - criterion: "Re-generated correct invoices"
+      weight: 0.08
+    - criterion: "Prepared Stripe explanation document"
+      weight: 0.10
+
+  communication:
+    - criterion: "Incident report includes full 9-hop chain"
+      weight: 0.09
+
+tags:
+  - "cascading-failure"
+  - "memory-leak"
+  - "gc-pause"
+  - "kubernetes-liveness"
+  - "batch-job"
+  - "data-integrity"
+  - "chargebacks"
+  - "9-hop"
+  - "business-impact"

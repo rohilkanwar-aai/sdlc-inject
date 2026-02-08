@@ -1,0 +1,306 @@
+id: CASCADE-003
+version: "2.0"
+name: "Certificate rotation misses one host -> intermittent TLS -> load balancer flapping -> customer checkout failures"
+category: "Cascading Failures"
+subcategory: "Infrastructure Chains"
+
+sdlc_phases:
+  primary: "Debugging"
+  secondary: ["Maintenance", "Deployment"]
+
+description: |
+  An 8-hop cascading failure where a certificate rotation script missed one of 12
+  backend hosts due to an SSH timeout. The host with the old cert causes intermittent
+  TLS handshake failures (1/12 requests). The load balancer marks the host unhealthy
+  intermittently, causing traffic redistribution storms. Users experience random
+  checkout failures that "work on retry."
+
+  The agent sees: "Customers report checkout randomly fails, but works when they try again"
+  The root cause is: One host has an expired certificate, 8 hops away.
+
+  Critical insight: Metrics show 91.7% success rate which looks "mostly healthy."
+  The 8.3% failure rate (1/12) is the fingerprint of the single bad host.
+
+causal_chain:
+  - hop: 1
+    component: "cert-rotation-script"
+    failure: "SSH timeout to api-server-07, skipped with warning (not error)"
+    boundary_type: "automation"
+    evidence_difficulty: "very_hard"
+    evidence_location: "ansible_logs_2_weeks_ago"
+    significant_silence: true
+
+  - hop: 2
+    component: "api-server-07"
+    failure: "Has expired certificate while other 11 hosts have new cert"
+    boundary_type: "infrastructure"
+    evidence_difficulty: "hard"
+    evidence_location: "host_certificate_check"
+
+  - hop: 3
+    component: "load-balancer -> api-server-07"
+    failure: "TLS handshake fails for requests routed to this host"
+    boundary_type: "infrastructure"
+    evidence_difficulty: "medium"
+    evidence_location: "load_balancer_logs"
+
+  - hop: 4
+    component: "load-balancer"
+    failure: "Health checks intermittently fail, host marked unhealthy/healthy flapping"
+    boundary_type: "infrastructure"
+    evidence_difficulty: "medium"
+    evidence_location: "lb_health_status"
+
+  - hop: 5
+    component: "client-connections"
+    failure: "In-flight requests to api-server-07 fail during health transition"
+    boundary_type: "network"
+    evidence_difficulty: "medium"
+    evidence_location: "client_error_logs"
+
+  - hop: 6
+    component: "checkout-service"
+    failure: "Backend call fails with SSL_ERROR, retry to different host succeeds"
+    boundary_type: "service"
+    evidence_difficulty: "medium"
+    evidence_location: "sentry"
+
+  - hop: 7
+    component: "checkout-ui"
+    failure: "User sees 'Something went wrong' error"
+    boundary_type: "user_facing"
+    evidence_difficulty: "easy"
+    evidence_location: "support_tickets"
+
+  - hop: 8
+    component: "customer-support"
+    failure: "Flood of 'checkout failed but worked on retry' tickets"
+    boundary_type: "business"
+    evidence_difficulty: "easy"
+    evidence_location: "slack"
+
+task_prompt: |
+  Customer Support is overwhelmed. Over the past 2 weeks, we've received 847
+  tickets about checkout failures. The strange pattern: customers say it fails
+  once, then works immediately when they try again.
+
+  "It's like flipping a coin. Sometimes it works, sometimes it doesn't. But
+  it always works the second time."
+
+  Our checkout success rate is 91.7% - not great, but not catastrophic.
+  Engineering says "We don't see any errors on our end."
+
+  Find out why checkout is randomly failing and fix it.
+
+requirements:
+  languages: ["go", "python", "typescript"]
+  patterns:
+    - "load_balancer"
+    - "tls_certificates"
+    - "health_checks"
+    - "retry_logic"
+  infrastructure:
+    - "nginx"
+    - "haproxy"
+    - "kubernetes"
+  min_services: 4
+
+evidence_map:
+  - hop: 8
+    source: "slack"
+    tool: "slack_get_messages('#support')"
+    evidence: "847 tickets: 'checkout fails then works on retry'"
+    reveals: "Pattern suggests intermittent failure, not total outage"
+    key_signal: "Works on retry = likely load balancer routing issue"
+
+  - hop: 7
+    source: "sentry"
+    tool: "sentry_list_issues(project='checkout-ui')"
+    evidence: "GenericError: 'Something went wrong' - 8.3% of sessions"
+    reveals: "Frontend sees errors but message is generic"
+    points_toward: "Check backend service for real error"
+
+  - hop: 6
+    source: "sentry"
+    tool: "sentry_list_issues(project='checkout-service')"
+    evidence: "SSL_ERROR_SYSCALL: Connection reset during TLS handshake"
+    reveals: "TLS handshake failures to backend"
+    points_toward: "Certificate or TLS configuration issue"
+
+  - hop: 5
+    source: "metrics"
+    tool: "prometheus_query('checkout_backend_errors_by_host')"
+    evidence: "api-server-07 has 100% error rate; others have ~0%"
+    reveals: "ONE specific host is failing all requests"
+    key_insight: "8.3% = 1/12 hosts = api-server-07 is the problem"
+
+  - hop: 4
+    source: "load_balancer"
+    tool: "bash: curl -s http://lb-admin/api/backends | jq '.[] | select(.flapping==true)'"
+    evidence: "api-server-07: flapping=true, last_healthy=14d ago, health_transitions=2847"
+    reveals: "Host is oscillating between healthy and unhealthy"
+
+  - hop: 3
+    source: "load_balancer_logs"
+    tool: "bash: grep api-server-07 /var/log/haproxy/health.log | tail -50"
+    evidence: "'backend api-server-07 is DOWN (TLS handshake failure)' alternating with UP"
+    reveals: "TLS is the cause of health check failures"
+
+  - hop: 2
+    source: "host_certificate"
+    tool: "bash: echo | openssl s_client -connect api-server-07:443 2>/dev/null | openssl x509 -noout -dates"
+    evidence: "notAfter=Nov 15 00:00:00 2024 GMT (EXPIRED)"
+    reveals: "Certificate on api-server-07 is expired"
+    key_insight: "Other hosts have cert valid until 2025"
+
+  - hop: 1
+    source: "ansible_logs"
+    tool: "bash: grep api-server-07 /var/log/ansible/cert_rotation_20241114.log"
+    evidence: "'TASK [deploy_cert] FAILED: SSH timeout to api-server-07, skipping (warn: true)'"
+    reveals: "Cert rotation script skipped this host with a warning, not an error"
+    root_cause: "Automation continued despite failure on one host"
+
+red_herrings:
+  - source: "slack"
+    message: "We deployed new checkout flow 2 weeks ago - maybe it's buggy?"
+    why_wrong: "Deploy was successful; timing is coincidental"
+
+  - source: "metrics"
+    message: "API latency P99 increased last week"
+    why_wrong: "Latency increase is caused by retry overhead, not root cause"
+
+  - source: "recent_changes"
+    message: "We upgraded TLS to 1.3 last month"
+    why_wrong: "TLS upgrade was successful; issue is certificate, not protocol"
+
+  - source: "sentry"
+    issue: "checkout-service: Connection timeout"
+    why_wrong: "Timeout is symptom of health check flapping, not root cause"
+
+shallow_fixes:
+  - fix: "Increase retry count"
+    why_fails: "Masks symptom but doesn't fix bad host; increases latency"
+    detection: "Retry config changes without host investigation"
+
+  - fix: "Remove api-server-07 from pool"
+    why_fails: "Band-aid; doesn't explain why it failed or prevent recurrence"
+    detection: "Manual LB config change without finding root cause"
+
+  - fix: "Restart api-server-07"
+    why_fails: "Certificate is still expired; restart won't help TLS"
+    detection: "Service restart commands without cert check"
+
+difficulty:
+  estimated_human_time_hours: 5
+  frontier_model_pass_rate_percent: 15
+  hop_count: 8
+  complexity_factors:
+    - "8 hops from symptom to root cause"
+    - "91.7% success looks 'mostly healthy'"
+    - "1/12 failure rate is the fingerprint of single bad host"
+    - "Cert rotation 'succeeded' (warn not error)"
+    - "Requires understanding LB health check mechanics"
+    - "Intermittent nature makes reproduction hard"
+
+failure_modes:
+  common:
+    - mode: "Blame checkout code"
+      description: "Assumes new checkout flow has bugs"
+      detection: "Code review of checkout-service without infra check"
+      hop_reached: 7
+
+    - mode: "Increase retries"
+      description: "Adds more retry logic instead of fixing root cause"
+      detection: "Retry config changes"
+      hop_reached: 6
+
+    - mode: "Restart services"
+      description: "Restarts checkout service thinking it's hung"
+      detection: "Service restart without LB investigation"
+      hop_reached: 6
+
+  subtle:
+    - mode: "Remove host without understanding"
+      description: "Takes api-server-07 out of pool but doesn't find cert issue"
+      detection: "LB config change without cert investigation"
+      hop_reached: 4
+
+    - mode: "Find cert but miss automation bug"
+      description: "Renews cert manually but doesn't fix rotation script"
+      detection: "Manual cert deploy without ansible fix"
+      hop_reached: 2
+
+golden_path:
+  steps:
+    - step: 1
+      action: "Quantify the failure pattern"
+      tools: ["metrics", "support tickets"]
+      evidence: "8.3% failure rate, works on retry"
+      key_insight: "8.3% ≈ 1/12 suggests one host out of 12"
+      hop: 7-8
+
+    - step: 2
+      action: "Identify the failing component"
+      tools: ["prometheus per-host metrics"]
+      evidence: "api-server-07 has 100% backend error rate"
+      hop: 5
+
+    - step: 3
+      action: "Check load balancer health status"
+      tools: ["LB admin API"]
+      evidence: "api-server-07 is flapping between healthy/unhealthy"
+      hop: 4
+
+    - step: 4
+      action: "Examine health check failures"
+      tools: ["LB logs"]
+      evidence: "TLS handshake failure"
+      hop: 3
+
+    - step: 5
+      action: "Check certificate on failing host"
+      tools: ["openssl s_client"]
+      evidence: "Certificate expired Nov 15"
+      hop: 2
+
+    - step: 6
+      action: "Find why cert wasn't rotated"
+      tools: ["ansible logs"]
+      evidence: "SSH timeout, skipped with warning"
+      hop: 1
+
+    - step: 7
+      action: "Fix and prevent recurrence"
+      tools: ["Deploy cert to api-server-07", "Fix ansible to fail on error"]
+      verification: "100% success rate restored"
+
+grading:
+  understanding:
+    - criterion: "Identified 1/12 hosts as the fingerprint"
+      weight: 0.10
+    - criterion: "Found api-server-07 as the failing host"
+      weight: 0.10
+    - criterion: "Identified certificate expiration"
+      weight: 0.15
+    - criterion: "Traced to cert rotation script failure"
+      weight: 0.15
+
+  outcome_based:
+    - criterion: "Deployed valid certificate to api-server-07"
+      weight: 0.15
+    - criterion: "Fixed ansible script to fail on error"
+      weight: 0.10
+    - criterion: "Success rate restored to >99%"
+      weight: 0.10
+
+  communication:
+    - criterion: "Incident report includes prevention measures"
+      weight: 0.15
+
+tags:
+  - "cascading-failure"
+  - "certificate-expiration"
+  - "load-balancer"
+  - "intermittent-failure"
+  - "automation-failure"
+  - "8-hop"

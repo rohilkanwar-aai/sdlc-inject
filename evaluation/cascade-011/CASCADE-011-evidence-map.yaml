@@ -1,0 +1,1056 @@
+# CASCADE-011 Evidence Map (8-hop, triple significant silence)
+# Target: <20% pass rate on Opus with LLM coworkers
+#
+# Cascade chain:
+#   Hop 1: sysctl tcp_wmem max reduced 16MB -> 4MB (kevin, 2 weeks ago)
+#   Hop 2: gRPC streams >4MB silently truncated at TCP layer
+#   Hop 3: Truncated protobuf parses OK (missing trailing optional fields)
+#   Hop 4: hold_for_review field (optional, field #47) silently dropped
+#   Hop 5: Orders auto-approve without hold_for_review -> webhook fires
+#   Hop 6: Partner fulfills first batch
+#   Hop 7: Second webhook fires (different timestamp-based idempotency key)
+#   Hop 8: Inventory goes negative -> storefront circuit breaker trips
+#
+# Triple significant silence:
+#   1. gRPC status = OK (gRPC doesn't detect TCP truncation on streams)
+#   2. protobuf.Unmarshal returns nil error (trailing optional fields just default)
+#   3. No TCP errors in kernel logs (silent truncation, no RST, no error counter)
+#
+# The 4MB boundary is the ONLY numeric breadcrumb:
+#   - "received payload exactly 4194304 bytes, source batch was 6.8MB"
+#   - Agent must connect this to "sysctl tcp_wmem max = 4194304"
+
+id: CASCADE-011-train-ticket
+name: "Kernel TCP tuning -> gRPC truncation -> double-fulfillment -> storefront blackout"
+codebase: "train-ticket"
+
+task_prompt: |
+  CRITICAL: Storefront is offline.
+
+  The storefront circuit breaker tripped 45 minutes ago. Inventory service
+  is returning negative stock for 847 SKUs. Three fulfillment partners
+  (ShipCo, FastFreight, PackLogic) are reporting they received duplicate
+  order batches and have already shipped double quantities.
+
+  You are the on-call incident commander. Investigate the root cause,
+  identify why orders are being double-fulfilled, restore the storefront,
+  and write an incident report.
+
+  Key facts so far:
+  - No code deployments today
+  - All pods healthy, health checks passing
+  - gRPC service mesh shows all calls returning OK
+  - Partners received two batches with different idempotency keys
+  - Only large order batches (>100 items) appear to be affected
+
+# ===========================================================================
+# NOISE CONFIGURATION (lighter than CASCADE-012 -- LLM coworkers add difficulty)
+# ===========================================================================
+noise_config:
+  entries_per_source: 5000
+  seed: 2026
+  time_range_hours: 336
+  signal_positions:
+    incidents: [47, 89, 127, 183, 247, 312, 389, 428, 502, 567, 634, 712, 789, 856, 923]
+    platform-general: [847, 1234, 2567]
+    sre-ops: [423, 891, 1567]
+    backend-eng: [234, 678, 1456]
+    deploys: [156, 489, 892, 1234]
+    alerts: [234, 567, 890, 1234]
+    fulfillment: [123, 456, 789]
+    support: [89, 234, 567]
+    order-processing-service: [1234, 2567, 3891]
+    inventory-service: [891, 1678, 2345]
+    fulfillment-gateway: [567, 1234, 1891]
+    storefront-api: [234, 891]
+
+# ===========================================================================
+# SLACK MCP SERVER
+# ===========================================================================
+slack:
+  channels:
+    - name: "#incidents"
+      messages:
+        - user: "bot: pagerduty"
+          timestamp: "2026-02-07T13:47:00Z"
+          text: "[FIRING] StorefrontCircuitBreaker: inventory-service returning negative stock for >50 SKUs. Circuit breaker OPEN. Storefront offline."
+
+        - user: "alicia (SRE on-call)"
+          timestamp: "2026-02-07T13:48:00Z"
+          text: "Ack'd. Looking at it now. Storefront is completely down -- circuit breaker tripped on inventory-service. 847 SKUs with negative stock."
+
+        - user: "lisa (support lead)"
+          timestamp: "2026-02-07T13:50:00Z"
+          text: "Partners are calling in. ShipCo says they received duplicate order batches. FastFreight and PackLogic reporting the same. We have 120+ support tickets already."
+
+        - user: "frank (devops)"
+          timestamp: "2026-02-07T13:52:00Z"
+          text: "All pods healthy. No OOM kills, no restarts, no deploys today. kubectl looks completely clean. Health checks passing everywhere."
+
+        - user: "dan (backend eng)"
+          timestamp: "2026-02-07T13:54:00Z"
+          text: "Looking at webhook logs. Orders are being sent to partners TWICE. The idempotency keys are different between the two sends -- they're timestamp-based so the 5-minute gap generates different keys."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2026-02-07T13:55:00Z"
+          text: "Double shipments?? Is it the database? Maybe we have a replication lag issue causing duplicate reads?"
+
+        - user: "dan (backend eng)"
+          timestamp: "2026-02-07T13:57:00Z"
+          text: "Not the database. The webhook dispatch log shows two separate dispatch events for the same order IDs. The first at 13:42, the second at 13:47. Different idempotency keys both times."
+
+        - user: "alicia (SRE on-call)"
+          timestamp: "2026-02-07T13:59:00Z"
+          text: "All gRPC health checks passing. Service mesh shows 100% OK status across the board. No errors anywhere in the gRPC layer. This is confusing -- if orders are being duplicated it should show up as errors somewhere."
+
+        - user: "priya (fulfillment eng)"
+          timestamp: "2026-02-07T14:01:00Z"
+          text: "I'm looking at the affected orders. ALL of them are from large batches -- >100 items per batch. Smaller orders are totally fine. The batch sizes for duplicated orders are all 5MB+."
+
+        - user: "dan (backend eng)"
+          timestamp: "2026-02-07T14:03:00Z"
+          text: "The webhook refactor last month changed idempotency keys from UUIDs to timestamps. That's why the two sends have different keys -- the partner can't dedup them. I bet the refactor introduced a retry bug."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2026-02-07T14:04:00Z"
+          text: "What if it's a race condition in the webhook dispatch? Maybe two workers are picking up the same batch?"
+
+        - user: "priya (fulfillment eng)"
+          timestamp: "2026-02-07T14:06:00Z"
+          text: "I checked the dispatch queue. Each batch only appears once. It's not a duplicate in the queue -- something is causing the same batch to be processed through two different code paths."
+
+        - user: "dan (backend eng)"
+          timestamp: "2026-02-07T14:08:00Z"
+          text: "Wait -- I just noticed something weird. On the duplicated orders, the hold_for_review flag is missing. Normally ~30% of orders have hold_for_review=true, but on ALL duplicated orders it's absent. That means they auto-approved and triggered the webhook immediately instead of going to the review queue."
+
+        - user: "alicia (SRE on-call)"
+          timestamp: "2026-02-07T14:10:00Z"
+          text: "How does hold_for_review get set? Is it in the order creation payload or added later?"
+
+        - user: "dan (backend eng)"
+          timestamp: "2026-02-07T14:12:00Z"
+          text: "It's in the gRPC order stream. The order-processing-service sends a protobuf with all order fields including hold_for_review. It's an optional bool, field number 47 -- near the end of the message."
+
+        - user: "frank (devops)"
+          timestamp: "2026-02-07T14:14:00Z"
+          text: "Can we just reset the circuit breaker and turn the storefront back on? Lisa is saying the CFO is asking for an ETA."
+
+        - user: "alicia (SRE on-call)"
+          timestamp: "2026-02-07T14:15:00Z"
+          text: "No. If we turn it back on with negative inventory, customers will order items we don't have. We need to understand WHY inventory went negative first."
+
+    - name: "#platform-general"
+      messages:
+        - user: "bot: ci-notify"
+          timestamp: "2026-01-22T09:15:00Z"
+          text: "Build passed: storefront-api #412 (main)"
+
+        - user: "bot: deploy-notify"
+          timestamp: "2026-01-23T14:30:00Z"
+          text: "Deploy complete: order-processing-service v3.8.1 -> v3.8.2 (webhook refactor)"
+
+        - user: "kevin (SRE)"
+          timestamp: "2026-01-24T10:45:00Z"
+          text: "applied memory optimization across cluster nodes. saving ~2GB RAM per host. tested with standard API traffic, looks good."
+
+        - user: "bot: ansible"
+          timestamp: "2026-01-24T10:47:00Z"
+          text: "Playbook complete: tcp_tuning.yml applied to 12 nodes. Changed: sysctl net.ipv4.tcp_wmem, sysctl net.ipv4.tcp_rmem. No errors."
+
+        - user: "frank (devops)"
+          timestamp: "2026-01-25T09:00:00Z"
+          text: "Nice savings on the memory, kevin. Every bit helps with our infra budget."
+
+        - user: "priya (fulfillment eng)"
+          timestamp: "2026-02-01T11:30:00Z"
+          text: "Reminder: fulfillment webhook idempotency key format changed from UUID to timestamp in v3.8.2. Partners have been notified."
+
+        - user: "bot: deploy-notify"
+          timestamp: "2026-02-04T16:00:00Z"
+          text: "Deploy complete: frontend v4.12.0 (minor UI updates)"
+
+    - name: "#sre-ops"
+      messages:
+        - user: "kevin (SRE)"
+          timestamp: "2026-01-24T10:30:00Z"
+          text: "Deploying TCP memory optimization. Reducing tcp_wmem max from 16MB to 4MB and tcp_rmem max from 16MB to 4MB. This saves ~2GB per host by limiting per-socket buffer allocation."
+
+        - user: "kevin (SRE)"
+          timestamp: "2026-01-24T10:50:00Z"
+          text: "TCP tuning deployed. Ran load test with 1000 concurrent HTTP/1.1 requests -- no issues. API latency unchanged. Memory usage dropped 2.1GB per host."
+
+        - user: "alicia (SRE on-call)"
+          timestamp: "2026-01-24T11:00:00Z"
+          text: "Did you test with gRPC traffic too? We have some big streaming payloads on the fulfillment pipeline."
+
+        - user: "kevin (SRE)"
+          timestamp: "2026-01-24T11:05:00Z"
+          text: "gRPC uses HTTP/2 which uses the same TCP stack, so it should be fine. The 4MB max is per-socket and most requests are way under that."
+
+        - user: "alicia (SRE on-call)"
+          timestamp: "2026-01-24T11:10:00Z"
+          text: "ok makes sense. just wanted to double check."
+
+    - name: "#backend-eng"
+      messages:
+        - user: "dan (backend eng)"
+          timestamp: "2026-01-23T14:00:00Z"
+          text: "Webhook refactor PR merged. Key changes: idempotency keys now timestamp-based, batch dispatch is now async with retry, hold_for_review check moved to the gRPC stream consumer."
+
+        - user: "priya (fulfillment eng)"
+          timestamp: "2026-01-23T14:15:00Z"
+          text: "Verified the partner integration tests pass. ShipCo test endpoint accepted the new key format."
+
+        - user: "dan (backend eng)"
+          timestamp: "2026-02-05T10:00:00Z"
+          text: "Anyone else noticed that some order batches seem to be missing fields? I saw a batch yesterday where hold_for_review wasn't set on any of the 200+ orders. Thought it was a one-off data issue."
+
+        - user: "priya (fulfillment eng)"
+          timestamp: "2026-02-05T10:15:00Z"
+          text: "Hmm that's weird. Were they all from the same batch? Could be a serialization bug in the batch builder."
+
+        - user: "dan (backend eng)"
+          timestamp: "2026-02-05T10:20:00Z"
+          text: "Yeah same batch. I checked the order-processing-service logs and the gRPC call returned OK. Figured it was just bad input data. Didn't investigate further."
+
+    - name: "#fulfillment"
+      messages:
+        - user: "priya (fulfillment eng)"
+          timestamp: "2026-02-07T13:55:00Z"
+          text: "CRITICAL: ShipCo, FastFreight, and PackLogic all reporting duplicate order batches. They've already shipped both. We need to stop outbound webhooks NOW."
+
+        - user: "priya (fulfillment eng)"
+          timestamp: "2026-02-07T14:00:00Z"
+          text: "Killed the webhook dispatcher. No more outbound batches. But the damage is done -- partners shipped 847 duplicate orders across all three partners."
+
+        - user: "priya (fulfillment eng)"
+          timestamp: "2026-02-07T14:20:00Z"
+          text: "I pulled batch payload sizes from the webhook logs. Every single duplicated batch was >4MB. Non-duplicated batches are all under 4MB. That's a really clean cutoff."
+
+    - name: "#deploys"
+      messages:
+        - user: "bot: deploy-notify"
+          timestamp: "2026-01-20T09:00:00Z"
+          text: "Deploy: inventory-service v2.4.0 -> v2.4.1 (batch reservation optimization)"
+
+        - user: "bot: deploy-notify"
+          timestamp: "2026-01-22T14:00:00Z"
+          text: "Deploy: fulfillment-gateway v1.9.3 -> v1.9.4 (retry logic improvements)"
+
+        - user: "bot: deploy-notify"
+          timestamp: "2026-01-23T14:35:00Z"
+          text: "Deploy: order-processing-service v3.8.1 -> v3.8.2 (webhook refactor, idempotency key change)"
+
+        - user: "bot: ansible"
+          timestamp: "2026-01-24T10:47:00Z"
+          text: "Ansible: tcp_tuning.yml applied to prod-node-{01..12}. Changes: net.ipv4.tcp_wmem, net.ipv4.tcp_rmem."
+
+        - user: "bot: deploy-notify"
+          timestamp: "2026-01-28T11:00:00Z"
+          text: "Deploy: storefront-api v2.1.0 -> v2.1.1 (circuit breaker threshold adjustment)"
+
+        - user: "bot: deploy-notify"
+          timestamp: "2026-01-30T16:00:00Z"
+          text: "Deploy: payment-service v3.5.2 -> v3.5.3 (PCI compliance patch)"
+
+        - user: "bot: deploy-notify"
+          timestamp: "2026-02-01T10:00:00Z"
+          text: "Deploy: order-processing-service v3.8.2 -> v3.8.3 (logging improvements)"
+
+        - user: "bot: deploy-notify"
+          timestamp: "2026-02-03T09:30:00Z"
+          text: "Deploy: recommendation-service v1.7.0 -> v1.7.1 (model update)"
+
+        - user: "bot: deploy-notify"
+          timestamp: "2026-02-04T16:00:00Z"
+          text: "Deploy: frontend v4.12.0 (minor UI updates)"
+
+        - user: "bot: deploy-notify"
+          timestamp: "2026-02-05T11:00:00Z"
+          text: "Deploy: cart-service v2.3.0 -> v2.3.1 (Redis connection pool tuning)"
+
+    - name: "#alerts"
+      messages:
+        - user: "bot: grafana-alerting"
+          timestamp: "2026-02-05T03:00:00Z"
+          text: "[RESOLVED] HighMemory: recommendation-service memory above 80% for 5m. Resolved after GC."
+
+        - user: "bot: pagerduty"
+          timestamp: "2026-02-06T14:20:00Z"
+          text: "[RESOLVED] HighLatency: fulfillment-gateway P99 > 2s. Duration: 4m. Auto-resolved."
+
+        - user: "bot: grafana-alerting"
+          timestamp: "2026-02-07T13:47:00Z"
+          text: "[FIRING] StorefrontCircuitBreaker: inventory-service negative stock count > 50. Current: 847. Storefront circuit breaker OPEN."
+
+        - user: "bot: grafana-alerting"
+          timestamp: "2026-02-07T13:48:00Z"
+          text: "[FIRING] InventoryNegativeStock: 847 SKUs have negative stock values. Max negative: -234 units (SKU: ELEC-TV-55-SAM)."
+
+        - user: "bot: pagerduty"
+          timestamp: "2026-02-07T13:49:00Z"
+          text: "[FIRING] FulfillmentDuplicateBatch: duplicate batch IDs detected in webhook dispatch log. 3 partners affected."
+
+    - name: "#support"
+      messages:
+        - user: "lisa (support lead)"
+          timestamp: "2026-02-07T13:50:00Z"
+          text: "ShipCo account manager called directly. They shipped duplicate orders and want to know who's paying for the return shipping."
+
+        - user: "lisa (support lead)"
+          timestamp: "2026-02-07T13:55:00Z"
+          text: "FastFreight and PackLogic also reporting duplicates. This is across ALL our fulfillment partners."
+
+        - user: "lisa (support lead)"
+          timestamp: "2026-02-07T14:10:00Z"
+          text: "Customer complaints about storefront being down now at 120+. CFO is asking for a customer impact assessment and ETA."
+
+        - user: "lisa (support lead)"
+          timestamp: "2026-02-07T14:25:00Z"
+          text: "ShipCo says they can't recall the shipments. They're already in transit. We need to figure out a returns process for 847 duplicate orders."
+
+    - name: "#random"
+      messages:
+        - user: "tyler (junior eng)"
+          timestamp: "2026-02-05T12:30:00Z"
+          text: "Anyone tried the new Thai place on Market St? Their pad thai is incredible."
+
+        - user: "frank (devops)"
+          timestamp: "2026-02-06T09:00:00Z"
+          text: "Monday motivation: at least the servers aren't on fire."
+
+        - user: "dan (backend eng)"
+          timestamp: "2026-02-07T08:30:00Z"
+          text: "Coffee machine in the 3rd floor kitchen is broken again."
+
+    - name: "#standups"
+      messages:
+        - user: "dan (backend eng)"
+          timestamp: "2026-02-07T09:00:00Z"
+          text: "Yesterday: investigated missing hold_for_review flags on some order batches. Couldn't reproduce. Today: continuing investigation. Blocker: none."
+
+        - user: "priya (fulfillment eng)"
+          timestamp: "2026-02-07T09:02:00Z"
+          text: "Yesterday: partner integration testing for new idempotency key format. Today: monitoring partner webhook delivery rates. Blocker: none."
+
+        - user: "kevin (SRE)"
+          timestamp: "2026-02-07T09:04:00Z"
+          text: "Yesterday: reviewed memory usage across cluster after tcp tuning. All looking good -- 2GB saved per host. Today: working on Prometheus retention policy. Blocker: none."
+
+# ===========================================================================
+# SENTRY MCP SERVER
+# ===========================================================================
+sentry:
+  projects:
+    - name: "order-processing-service"
+      issues:
+        - id: "OPS-1847"
+          title: "Webhook dispatch: duplicate batch detected (different idempotency keys)"
+          count: 23
+          first_seen: "2026-02-07T13:42:00Z"
+          last_seen: "2026-02-07T14:15:00Z"
+          level: "error"
+          tags:
+            batch_count: "23"
+            partner: "ShipCo, FastFreight, PackLogic"
+            note: "Batches sent twice with different timestamp-based idempotency keys"
+
+        - id: "OPS-1848"
+          title: "Order missing hold_for_review flag -- auto-approved"
+          count: 847
+          first_seen: "2026-02-05T08:00:00Z"
+          last_seen: "2026-02-07T14:10:00Z"
+          level: "warning"
+          tags:
+            environment: "production"
+            note: "hold_for_review absent from deserialized protobuf. Protobuf.Unmarshal returned no error."
+
+    - name: "fulfillment-gateway"
+      issues:
+        - id: "FG-502"
+          title: "Partner webhook returned 409 Conflict (idempotency key mismatch)"
+          count: 0
+          first_seen: null
+          level: "info"
+          tags:
+            note: "No 409s -- partners accepted both batches because idempotency keys differed"
+
+    - name: "inventory-service"
+      issues:
+        - id: "INV-934"
+          title: "Stock level went negative: SKU ELEC-TV-55-SAM, current: -234"
+          count: 847
+          first_seen: "2026-02-07T13:44:00Z"
+          last_seen: "2026-02-07T13:47:00Z"
+          level: "error"
+          tags:
+            max_negative: "-234"
+            sku_count: "847"
+
+    - name: "storefront-api"
+      issues:
+        - id: "SF-789"
+          title: "Circuit breaker OPEN: inventory-service returning negative stock"
+          count: 1
+          first_seen: "2026-02-07T13:47:00Z"
+          level: "critical"
+          tags:
+            threshold: "50 negative SKUs"
+            actual: "847 negative SKUs"
+            state: "OPEN"
+
+    # SIGNIFICANT SILENCE: gRPC shows no errors
+    - name: "grpc-mesh"
+      issues: []
+
+    # SIGNIFICANT SILENCE: No TCP errors anywhere
+    - name: "infrastructure-network"
+      issues: []
+
+    # SIGNIFICANT SILENCE: protobuf parsing reports no errors
+    - name: "protobuf-serialization"
+      issues: []
+
+    # Normal services
+    - name: "payment-service"
+      issues: []
+
+    - name: "cart-service"
+      issues:
+        - id: "CART-223"
+          title: "Redis connection timeout during health check"
+          count: 3
+          first_seen: "2026-02-06T22:00:00Z"
+          level: "warning"
+          tags:
+            note: "Transient Redis blip overnight, auto-resolved"
+
+    - name: "storefront-frontend"
+      issues:
+        - id: "SFE-445"
+          title: "503 Service Unavailable from storefront-api"
+          count: 3420
+          first_seen: "2026-02-07T13:47:00Z"
+          level: "error"
+          tags:
+            note: "Consequence of circuit breaker being open"
+
+    - name: "recommendation-service"
+      issues:
+        - id: "REC-178"
+          title: "Model refresh cache miss: stale recommendations served"
+          count: 12
+          first_seen: "2026-02-06T06:00:00Z"
+          level: "warning"
+          tags:
+            note: "Unrelated -- model cache TTL issue from yesterday"
+
+    # DISTRACTOR: pre-existing issues
+    - name: "email-service"
+      issues:
+        - id: "EMAIL-089"
+          title: "SMTP connection pool exhaustion under high volume"
+          count: 5
+          first_seen: "2026-02-03T14:00:00Z"
+          level: "warning"
+          tags:
+            note: "Known issue, being tracked in JIRA"
+
+# ===========================================================================
+# PAGERDUTY MCP SERVER
+# ===========================================================================
+pagerduty:
+  incidents:
+    - id: "PD-78901"
+      title: "StorefrontCircuitBreaker: inventory-service negative stock"
+      urgency: "high"
+      status: "triggered"
+      created_at: "2026-02-07T13:47:00Z"
+      service: "storefront-api"
+      timeline:
+        - timestamp: "2026-02-07T13:47:00Z"
+          action: "Alert triggered"
+          detail: "inventory-service returning negative stock for 847 SKUs. Circuit breaker OPEN."
+        - timestamp: "2026-02-07T13:48:00Z"
+          action: "Acknowledged by alicia"
+
+    - id: "PD-78902"
+      title: "FulfillmentDuplicateBatch: duplicate batch IDs in webhook log"
+      urgency: "high"
+      status: "triggered"
+      created_at: "2026-02-07T13:49:00Z"
+      service: "fulfillment-gateway"
+      timeline:
+        - timestamp: "2026-02-07T13:49:00Z"
+          action: "Alert triggered"
+          detail: "23 duplicate batch dispatches detected. 3 partners affected."
+        - timestamp: "2026-02-07T13:50:00Z"
+          action: "Acknowledged by priya"
+
+    - id: "PD-78890"
+      title: "[RESOLVED] HighLatency: fulfillment-gateway P99 > 2s"
+      urgency: "medium"
+      status: "resolved"
+      created_at: "2026-02-06T14:20:00Z"
+      resolved_at: "2026-02-06T14:24:00Z"
+      service: "fulfillment-gateway"
+      timeline:
+        - timestamp: "2026-02-06T14:20:00Z"
+          action: "Alert triggered"
+        - timestamp: "2026-02-06T14:24:00Z"
+          action: "Auto-resolved"
+
+# ===========================================================================
+# PROMETHEUS / METRICS MCP SERVER
+# ===========================================================================
+metrics:
+  queries:
+    # ===================================================================
+    # INVENTORY SYMPTOMS (most visible)
+    # ===================================================================
+    - query: "inventory_negative_stock_skus"
+      result:
+        current: 847
+        1h_ago: 0
+        note: "847 SKUs with negative stock. Jumped from 0 to 847 in a 5-minute window."
+
+    - query: "inventory_stock_level{sku='ELEC-TV-55-SAM'}"
+      result:
+        current: -234
+        1h_ago: 412
+        note: "Most negative SKU. Was 412 units, now -234."
+
+    - query: "storefront_circuit_breaker_state"
+      result:
+        current: "OPEN"
+        note: "Tripped at 13:47 UTC. Threshold: 50 negative SKUs."
+
+    - query: "storefront_request_rate"
+      result:
+        current: 0
+        1h_ago: 245
+        note: "Zero -- storefront is offline"
+
+    # ===================================================================
+    # FULFILLMENT / WEBHOOK SYMPTOMS
+    # ===================================================================
+    - query: "fulfillment_webhook_dispatch_total"
+      result:
+        current: 46
+        1h_ago: 0
+        note: "23 batches dispatched twice = 46 total dispatches"
+
+    - query: "fulfillment_webhook_success_rate"
+      result:
+        current: 1.0
+        note: "100% success -- partners accepted all dispatches (no dedup)"
+
+    - query: "fulfillment_batch_size_bytes{quantile='0.99'}"
+      result:
+        current: 6800000
+        note: "P99 batch size is 6.8MB"
+
+    - query: "fulfillment_batch_size_bytes{quantile='0.50'}"
+      result:
+        current: 2100000
+        note: "P50 batch size is 2.1MB"
+
+    # ===================================================================
+    # ORDER PROCESSING METRICS
+    # ===================================================================
+    - query: "order_hold_for_review_rate"
+      result:
+        current: 0.0
+        24h_ago: 0.31
+        note: "0% hold rate now vs normal 31%. All orders auto-approving."
+
+    - query: "order_auto_approved_total"
+      result:
+        rate_1m: 12.4
+        24h_ago_rate: 8.5
+        note: "Elevated -- orders that should be held are auto-approving"
+
+    - query: "order_processing_grpc_status{code='OK'}"
+      result:
+        rate_1m: 12.4
+        note: "All gRPC calls returning OK"
+
+    - query: "order_processing_grpc_status{code='Error'}"
+      result:
+        rate_1m: 0
+        note: "Zero gRPC errors -- SIGNIFICANT SILENCE"
+
+    # ===================================================================
+    # THE KEY BREADCRUMB: payload size truncation
+    # ===================================================================
+    - query: "grpc_server_msg_received_size_bytes{service='order-processing-service',quantile='0.99'}"
+      result:
+        current: 4194304
+        note: "P99 received message size is EXACTLY 4194304 bytes (4MB). Suspicious round number."
+
+    - query: "grpc_server_msg_received_size_bytes{service='order-processing-service',quantile='0.50'}"
+      result:
+        current: 2100000
+        note: "P50 is 2.1MB -- normal"
+
+    - query: "grpc_client_msg_sent_size_bytes{service='batch-builder',quantile='0.99'}"
+      result:
+        current: 6800000
+        note: "Client SENDS 6.8MB but server RECEIVES 4194304 bytes. The difference is lost."
+
+    # ===================================================================
+    # gRPC METRICS (all look healthy -- significant silence)
+    # ===================================================================
+    - query: "grpc_server_handled_total{service='order-processing-service',grpc_code='OK'}"
+      result:
+        rate_1m: 12.4
+        note: "All calls OK"
+
+    - query: "grpc_server_handled_total{service='order-processing-service',grpc_code='Internal'}"
+      result:
+        rate_1m: 0
+        note: "Zero internal errors"
+
+    - query: "grpc_server_handled_total{service='order-processing-service',grpc_code='Unavailable'}"
+      result:
+        rate_1m: 0
+        note: "Zero unavailable errors"
+
+    - query: "grpc_server_handling_seconds{service='order-processing-service',quantile='0.99'}"
+      result:
+        current: 0.45
+        note: "Normal latency"
+
+    # ===================================================================
+    # TCP/NETWORK METRICS (no errors -- significant silence)
+    # ===================================================================
+    - query: "node_netstat_Tcp_RetransSegs"
+      result:
+        rate_1m: 0.2
+        note: "Minimal retransmissions -- TCP layer looks healthy"
+
+    - query: "node_netstat_Tcp_InErrs"
+      result:
+        rate_1m: 0
+        note: "Zero TCP input errors"
+
+    - query: "node_netstat_Tcp_OutRsts"
+      result:
+        rate_1m: 0.1
+        note: "Near-zero RST packets"
+
+    - query: "node_network_receive_errs_total{device='eth0'}"
+      result:
+        rate_1m: 0
+        note: "Zero network receive errors"
+
+    - query: "node_network_transmit_errs_total{device='eth0'}"
+      result:
+        rate_1m: 0
+        note: "Zero network transmit errors"
+
+    # ===================================================================
+    # INFRASTRUCTURE METRICS (all healthy)
+    # ===================================================================
+    - query: "node_cpu_seconds_total{mode='idle'}"
+      result:
+        rate_1m: 0.68
+        note: "68% idle -- not CPU constrained"
+
+    - query: "node_memory_MemAvailable_bytes"
+      result:
+        current: 14000000000
+        total: 32000000000
+        note: "44% memory available -- this IMPROVED after kevin's tcp_wmem change (freed ~2GB)"
+
+    - query: "node_filesystem_avail_bytes{mountpoint='/'}"
+      result:
+        current: 45000000000
+        total: 100000000000
+        note: "45% disk free -- healthy"
+
+    - query: "container_cpu_usage_seconds_total{pod=~'order-processing-.*'}"
+      result:
+        rate_1m: 0.15
+        note: "Normal CPU"
+
+    - query: "container_memory_working_set_bytes{pod=~'order-processing-.*'}"
+      result:
+        current: 312000000
+        limit: 536870912
+        note: "58% memory -- normal"
+
+    - query: "container_cpu_usage_seconds_total{pod=~'inventory-.*'}"
+      result:
+        rate_1m: 0.08
+        note: "Normal"
+
+    - query: "container_cpu_usage_seconds_total{pod=~'fulfillment-.*'}"
+      result:
+        rate_1m: 0.12
+        note: "Normal"
+
+    - query: "container_cpu_usage_seconds_total{pod=~'storefront-.*'}"
+      result:
+        rate_1m: 0.01
+        note: "Near zero -- storefront is rejecting all requests (circuit breaker open)"
+
+    # ===================================================================
+    # HEALTHY SERVICE METRICS
+    # ===================================================================
+    - query: "payment_service_success_rate"
+      result:
+        current: 0.998
+        note: "Payment service healthy"
+
+    - query: "cart_service_request_rate"
+      result:
+        current: 0
+        note: "Zero -- storefront is down so no cart requests"
+
+    - query: "recommendation_service_latency_p99"
+      result:
+        current: 0.089
+        note: "Normal"
+
+    # ===================================================================
+    # PROCESS METRICS
+    # ===================================================================
+    - query: "process_open_fds{service='order-processing-service'}"
+      result:
+        current: 156
+        note: "Normal file descriptor count"
+
+    - query: "go_goroutines{service='order-processing-service'}"
+      result:
+        current: 48
+        note: "Normal goroutine count"
+
+    - query: "go_goroutines{service='inventory-service'}"
+      result:
+        current: 32
+        note: "Normal"
+
+# ===========================================================================
+# LOGS MCP SERVER
+# ===========================================================================
+logs:
+  services:
+    - name: "order-processing-service"
+      entries:
+        - timestamp: "2026-02-07T13:40:00Z"
+          level: "INFO"
+          message: "Processing batch batch-20260207-1340 with 234 orders (payload: 6.8MB)"
+
+        - timestamp: "2026-02-07T13:40:01Z"
+          level: "INFO"
+          message: "gRPC stream received: batch-20260207-1340, bytes_received=4194304, status=OK"
+
+        - timestamp: "2026-02-07T13:40:01Z"
+          level: "DEBUG"
+          message: "protobuf.Unmarshal: success, orders_parsed=234, fields_present=[1,2,3,5,8,13,21,34], fields_absent=[47]"
+
+        - timestamp: "2026-02-07T13:40:02Z"
+          level: "INFO"
+          message: "Batch batch-20260207-1340: 0/234 orders have hold_for_review=true. Auto-approving entire batch."
+
+        - timestamp: "2026-02-07T13:40:02Z"
+          level: "INFO"
+          message: "Dispatching webhook to ShipCo: batch=batch-20260207-1340, orders=234, idempotency_key=2026-02-07T13:40:02.123Z"
+
+        - timestamp: "2026-02-07T13:42:00Z"
+          level: "INFO"
+          message: "Processing batch batch-20260207-1342 with 613 orders (payload: 5.2MB)"
+
+        - timestamp: "2026-02-07T13:42:01Z"
+          level: "INFO"
+          message: "gRPC stream received: batch-20260207-1342, bytes_received=4194304, status=OK"
+
+        - timestamp: "2026-02-07T13:42:01Z"
+          level: "INFO"
+          message: "Batch batch-20260207-1342: 0/613 orders have hold_for_review=true. Auto-approving entire batch."
+
+        - timestamp: "2026-02-07T13:42:02Z"
+          level: "INFO"
+          message: "Dispatching webhook to FastFreight: batch=batch-20260207-1342, orders=613"
+
+        - timestamp: "2026-02-07T13:43:00Z"
+          level: "INFO"
+          message: "Processing batch batch-20260207-1343-small with 12 orders (payload: 340KB)"
+
+        - timestamp: "2026-02-07T13:43:01Z"
+          level: "INFO"
+          message: "gRPC stream received: batch-20260207-1343-small, bytes_received=348160, status=OK"
+
+        - timestamp: "2026-02-07T13:43:01Z"
+          level: "INFO"
+          message: "Batch batch-20260207-1343-small: 4/12 orders have hold_for_review=true. Routing 4 to review queue, 8 auto-approved."
+
+        - timestamp: "2026-02-07T13:45:00Z"
+          level: "WARN"
+          message: "Batch batch-20260207-1340 re-entered processing pipeline via retry. Previous dispatch at 13:40. New idempotency_key=2026-02-07T13:45:00.456Z"
+
+        - timestamp: "2026-02-07T13:45:01Z"
+          level: "INFO"
+          message: "Dispatching webhook to ShipCo: batch=batch-20260207-1340 (retry), orders=234, idempotency_key=2026-02-07T13:45:00.456Z"
+
+        - timestamp: "2026-02-07T13:47:00Z"
+          level: "WARN"
+          message: "Batch batch-20260207-1342 re-entered processing pipeline via retry. Previous dispatch at 13:42."
+
+    - name: "inventory-service"
+      entries:
+        - timestamp: "2026-02-07T13:40:03Z"
+          level: "INFO"
+          message: "Stock reservation: batch-20260207-1340, 234 items reserved"
+
+        - timestamp: "2026-02-07T13:42:03Z"
+          level: "INFO"
+          message: "Stock reservation: batch-20260207-1342, 613 items reserved"
+
+        - timestamp: "2026-02-07T13:45:02Z"
+          level: "WARN"
+          message: "Stock reservation: batch-20260207-1340 (duplicate), 234 items -- stock going NEGATIVE for 89 SKUs"
+
+        - timestamp: "2026-02-07T13:47:02Z"
+          level: "ERROR"
+          message: "Stock reservation: batch-20260207-1342 (duplicate), 613 items -- stock NEGATIVE for 847 SKUs. Max negative: -234 (ELEC-TV-55-SAM)"
+
+        - timestamp: "2026-02-07T13:47:03Z"
+          level: "CRITICAL"
+          message: "Circuit breaker threshold exceeded: 847 negative-stock SKUs > threshold 50. Reporting UNHEALTHY to storefront-api."
+
+    - name: "fulfillment-gateway"
+      entries:
+        - timestamp: "2026-02-07T13:40:03Z"
+          level: "INFO"
+          message: "Webhook POST to ShipCo: batch=batch-20260207-1340, status=202 Accepted, response_time=340ms"
+
+        - timestamp: "2026-02-07T13:42:03Z"
+          level: "INFO"
+          message: "Webhook POST to FastFreight: batch=batch-20260207-1342, status=202 Accepted, response_time=280ms"
+
+        - timestamp: "2026-02-07T13:45:02Z"
+          level: "INFO"
+          message: "Webhook POST to ShipCo: batch=batch-20260207-1340 (retry), status=202 Accepted, response_time=310ms"
+
+        - timestamp: "2026-02-07T13:47:02Z"
+          level: "INFO"
+          message: "Webhook POST to FastFreight: batch=batch-20260207-1342 (retry), status=202 Accepted, response_time=295ms"
+
+        - timestamp: "2026-02-07T13:47:03Z"
+          level: "INFO"
+          message: "All webhook dispatches completed successfully. No errors."
+
+    - name: "storefront-api"
+      entries:
+        - timestamp: "2026-02-07T13:47:03Z"
+          level: "ERROR"
+          message: "Circuit breaker OPEN for inventory-service. Returning 503 for all storefront requests."
+
+        - timestamp: "2026-02-07T13:47:04Z"
+          level: "INFO"
+          message: "Draining in-flight requests. 34 requests returned 503."
+
+    - name: "batch-builder"
+      entries:
+        - timestamp: "2026-02-07T13:39:59Z"
+          level: "INFO"
+          message: "Building batch batch-20260207-1340: 234 orders, serialized protobuf size=6841344 bytes (6.52MB), sending via gRPC stream"
+
+        - timestamp: "2026-02-07T13:40:00Z"
+          level: "DEBUG"
+          message: "gRPC stream send complete: batch-20260207-1340, bytes_sent=6841344, stream_status=OK"
+
+        - timestamp: "2026-02-07T13:41:59Z"
+          level: "INFO"
+          message: "Building batch batch-20260207-1342: 613 orders, serialized protobuf size=5242880 bytes (5.0MB), sending via gRPC stream"
+
+        - timestamp: "2026-02-07T13:43:00Z"
+          level: "INFO"
+          message: "Building batch batch-20260207-1343-small: 12 orders, serialized protobuf size=348160 bytes (340KB), sending via gRPC stream"
+
+        - timestamp: "2026-02-07T13:43:00Z"
+          level: "DEBUG"
+          message: "gRPC stream send complete: batch-20260207-1343-small, bytes_sent=348160, stream_status=OK"
+
+    # Kernel/system logs -- no tcp_wmem errors (significant silence)
+    - name: "system-kernel"
+      entries:
+        - timestamp: "2026-02-07T13:00:00Z"
+          level: "INFO"
+          message: "kernel: TCP: tcp_wmem = 4096 87380 4194304"
+
+        - timestamp: "2026-02-07T13:00:00Z"
+          level: "INFO"
+          message: "kernel: TCP: tcp_rmem = 4096 87380 4194304"
+
+        - timestamp: "2026-02-07T13:00:01Z"
+          level: "INFO"
+          message: "kernel: net.core.somaxconn = 65535"
+
+        - timestamp: "2026-02-07T13:00:01Z"
+          level: "INFO"
+          message: "kernel: net.ipv4.tcp_max_syn_backlog = 65535"
+
+# ===========================================================================
+# FEATURE FLAGS
+# ===========================================================================
+feature_flags:
+  flags:
+    - name: "fulfillment_webhook_async"
+      value: true
+      description: "Enable async webhook dispatch for fulfillment batches"
+      last_modified: "2026-01-23T14:30:00Z"
+      modified_by: "dan"
+
+    - name: "order_hold_for_review_enabled"
+      value: true
+      description: "Enable hold_for_review flag processing in order pipeline"
+      last_modified: "2025-11-15T10:00:00Z"
+      modified_by: "priya"
+
+    - name: "storefront_circuit_breaker_enabled"
+      value: true
+      description: "Enable circuit breaker on inventory service health"
+      last_modified: "2026-01-28T11:00:00Z"
+      modified_by: "alicia"
+
+    - name: "idempotency_key_format_v2"
+      value: true
+      description: "Use timestamp-based idempotency keys instead of UUIDs"
+      last_modified: "2026-01-23T14:30:00Z"
+      modified_by: "dan"
+
+    - name: "batch_retry_enabled"
+      value: true
+      description: "Enable automatic retry for failed batch dispatches"
+      last_modified: "2026-01-22T14:00:00Z"
+      modified_by: "priya"
+
+# ===========================================================================
+# GIT MCP SERVER
+# ===========================================================================
+git:
+  commits:
+    - hash: "a1b2c3d"
+      author: "kevin.park"
+      date: "2026-01-24T10:30:00Z"
+      message: "infra: reduce tcp buffer sizes for memory optimization"
+      files:
+        - "ansible/roles/tcp_tuning/tasks/main.yml"
+        - "ansible/roles/tcp_tuning/templates/99-tcp-tuning.conf.j2"
+
+    - hash: "d4e5f6g"
+      author: "dan.rogers"
+      date: "2026-01-23T14:00:00Z"
+      message: "feat: refactor webhook dispatch with timestamp idempotency keys"
+      files:
+        - "services/order-processing/webhook_dispatch.go"
+        - "services/order-processing/idempotency.go"
+        - "services/fulfillment-gateway/dispatch.go"
+
+    - hash: "h7i8j9k"
+      author: "priya.sharma"
+      date: "2026-01-22T14:00:00Z"
+      message: "fix: improve fulfillment retry logic with backoff"
+      files:
+        - "services/fulfillment-gateway/retry.go"
+        - "services/fulfillment-gateway/config.go"
+
+    - hash: "l0m1n2o"
+      author: "frank.martinez"
+      date: "2026-01-28T11:00:00Z"
+      message: "chore: adjust circuit breaker threshold for inventory service"
+      files:
+        - "services/storefront-api/circuit_breaker.go"
+
+    - hash: "p3q4r5s"
+      author: "dan.rogers"
+      date: "2026-02-01T10:00:00Z"
+      message: "chore: add structured logging to order processing"
+      files:
+        - "services/order-processing/logging.go"
+        - "services/order-processing/main.go"
+
+    - hash: "t6u7v8w"
+      author: "tyler.nguyen"
+      date: "2026-02-03T09:30:00Z"
+      message: "feat: update recommendation model to v1.7.1"
+      files:
+        - "services/recommendation/model_config.yaml"
+
+    - hash: "x9y0z1a"
+      author: "frank.martinez"
+      date: "2026-02-04T16:00:00Z"
+      message: "chore: frontend v4.12.0 minor UI updates"
+      files:
+        - "frontend/src/pages/checkout.tsx"
+        - "frontend/src/components/cart.tsx"
+
+    - hash: "b2c3d4e"
+      author: "dan.rogers"
+      date: "2026-02-05T11:00:00Z"
+      message: "fix: tune Redis connection pool for cart service"
+      files:
+        - "services/cart/redis_config.go"
+
+    - hash: "f5g6h7i"
+      author: "priya.sharma"
+      date: "2026-01-30T16:00:00Z"
+      message: "security: PCI compliance patch for payment service"
+      files:
+        - "services/payment/encryption.go"
+        - "services/payment/audit_log.go"
+
+    - hash: "j8k9l0m"
+      author: "kevin.park"
+      date: "2026-01-20T09:00:00Z"
+      message: "perf: optimize inventory batch reservation"
+      files:
+        - "services/inventory/batch_reserve.go"
+
+  blame:
+    "ansible/roles/tcp_tuning/templates/99-tcp-tuning.conf.j2":
+      - line: 1
+        hash: "a1b2c3d"
+        author: "kevin.park"
+        date: "2026-01-24T10:30:00Z"
+        content: "# TCP Memory Optimization - saves ~2GB per host"
+
+      - line: 2
+        hash: "a1b2c3d"
+        author: "kevin.park"
+        date: "2026-01-24T10:30:00Z"
+        content: "# Reduced max from 16MB to 4MB per socket"
+
+      - line: 3
+        hash: "a1b2c3d"
+        author: "kevin.park"
+        date: "2026-01-24T10:30:00Z"
+        content: "net.ipv4.tcp_wmem = 4096 87380 4194304"
+
+      - line: 4
+        hash: "a1b2c3d"
+        author: "kevin.park"
+        date: "2026-01-24T10:30:00Z"
+        content: "net.ipv4.tcp_rmem = 4096 87380 4194304"
+
+      - line: 5
+        hash: "a1b2c3d"
+        author: "kevin.park"
+        date: "2026-01-24T10:30:00Z"
+        content: "net.core.somaxconn = 65535"
+
+    "services/order-processing/webhook_dispatch.go":
+      - line: 47
+        hash: "d4e5f6g"
+        author: "dan.rogers"
+        date: "2026-01-23T14:00:00Z"
+        content: "idempotencyKey := time.Now().UTC().Format(time.RFC3339Nano)"
+
+      - line: 48
+        hash: "d4e5f6g"
+        author: "dan.rogers"
+        date: "2026-01-23T14:00:00Z"
+        content: "// Changed from UUID to timestamp for better traceability"

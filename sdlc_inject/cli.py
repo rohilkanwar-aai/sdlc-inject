@@ -31,6 +31,7 @@ from .environment import generate_environment
 from .artifacts import generate_artifacts_for_pattern
 from .analyzer import CodebaseAnalyzer, NeuralCodeAnalyzer
 from .enricher import PatternUpdater
+from .cascade_matcher import match_cascade_patterns, neural_map_hops
 
 console = Console()
 
@@ -1595,6 +1596,208 @@ def analyze_trajectories_cmd(
             with open(output_path, "w") as f:
                 f.write(result.to_json())
         console.print(f"\n[green]Analytics saved to {output}[/green]")
+
+
+@main.command("cascade-fit")
+@click.argument("codebase_path")
+@click.option("--patterns-dir", default=None, help="Directory containing CASCADE-*.yaml files (default: catalog cascade dir)")
+@click.option("-k", "--top-k", default=5, help="Number of top matches to show")
+@click.option("--min-score", default=0.3, type=float, help="Minimum match score threshold")
+@click.option("--neural/--no-neural", default=False, help="Run neural Phase 2 hop mapping on top match")
+@click.option("-m", "--model", default="claude-sonnet-4-5-20250929", help="Model for neural mapping")
+@click.option("-f", "--format", "fmt", default="table", help="Output format (table, json, yaml)")
+@click.option("-o", "--output", default=None, help="Save results to file (JSON)")
+@click.pass_context
+def cascade_fit(
+    ctx: click.Context,
+    codebase_path: str,
+    patterns_dir: str | None,
+    top_k: int,
+    min_score: float,
+    neural: bool,
+    model: str,
+    fmt: str,
+    output: str | None,
+) -> None:
+    """Find which cascade patterns best fit a codebase.
+
+    Scans the codebase architecture (languages, infrastructure, code patterns,
+    service boundaries) and scores each CASCADE pattern's requirements against it.
+
+    Phase 1 (Static): Fast fingerprint + scoring. No API calls.
+    Phase 2 (Neural): Optional. Maps specific files to each hop in the causal chain.
+
+    Examples:
+        sdlc-inject cascade-fit ./my-microservice-app
+        sdlc-inject cascade-fit https://github.com/open-telemetry/opentelemetry-demo
+        sdlc-inject cascade-fit ./app --patterns-dir ./patterns/cascade --top-k 3
+        sdlc-inject cascade-fit ./app --neural  # Deep analysis with Claude
+    """
+    # Resolve patterns directory
+    if patterns_dir is None:
+        catalog_dir = ctx.obj["catalog_dir"]
+        patterns_dir = str(Path(catalog_dir) / "cascade")
+
+    # Handle GitHub URLs
+    temp_dir = None
+    analysis_path = codebase_path
+
+    if _is_github_url(codebase_path):
+        console.print(f"[bold]Cloning repository: {codebase_path}[/bold]\n")
+        with console.status("[bold blue]Cloning...[/bold blue]"):
+            temp_dir = _clone_github_repo(codebase_path, shallow=True)
+            analysis_path = str(temp_dir)
+        console.print(f"[green]Cloned to: {temp_dir}[/green]\n")
+
+    try:
+        # Phase 1: Static matching
+        fingerprint, matches = match_cascade_patterns(
+            analysis_path, patterns_dir, top_k=top_k, min_score=min_score,
+        )
+
+        if not matches:
+            console.print("[yellow]No cascade patterns matched above the score threshold.[/yellow]")
+            console.print(f"[dim]Try lowering --min-score (currently {min_score})[/dim]")
+            return
+
+        # Display results
+        if fmt == "json":
+            import json as json_mod
+            data = {
+                "codebase": analysis_path,
+                "fingerprint": {
+                    "languages": fingerprint.languages,
+                    "infrastructure": list(fingerprint.infrastructure.keys()),
+                    "code_patterns": list(fingerprint.code_patterns.keys()),
+                    "services": fingerprint.service_dirs,
+                    "total_files": fingerprint.total_files,
+                    "total_lines": fingerprint.total_lines,
+                },
+                "matches": [
+                    {
+                        "pattern_id": m.pattern_id,
+                        "pattern_name": m.pattern_name,
+                        "score": m.score,
+                        "hop_count": m.hop_count,
+                        "estimated_pass_rate": m.estimated_pass_rate,
+                        "language_match": m.language_match,
+                        "infra_match": m.infra_match,
+                        "infra_missing": m.infra_missing,
+                        "pattern_match": m.pattern_match,
+                        "pattern_missing": m.pattern_missing,
+                        "service_fit": m.service_fit,
+                        "rationale": m.rationale,
+                        "hop_mappings": m.hop_mappings,
+                    }
+                    for m in matches
+                ],
+            }
+            console.print(json_mod.dumps(data, indent=2))
+            if output:
+                with open(output, "w") as f:
+                    json_mod.dump(data, f, indent=2)
+                console.print(f"\n[green]Results saved to {output}[/green]")
+            return
+
+        # Table format
+        table = Table(title=f"Cascade Pattern Fit ({len(matches)} matches)")
+        table.add_column("Rank", style="dim", justify="right")
+        table.add_column("Pattern", style="cyan")
+        table.add_column("Score", justify="right")
+        table.add_column("Hops", justify="right")
+        table.add_column("Pass%", justify="right")
+        table.add_column("Infra Match", max_width=25)
+        table.add_column("Missing", max_width=25, style="yellow")
+
+        for i, m in enumerate(matches, 1):
+            score_style = "green" if m.score >= 0.7 else "yellow" if m.score >= 0.5 else "dim"
+            rate_style = "red" if m.estimated_pass_rate <= 10 else "yellow" if m.estimated_pass_rate <= 20 else "green"
+
+            name_display = m.pattern_name[:40] + "..." if len(m.pattern_name) > 42 else m.pattern_name
+
+            table.add_row(
+                str(i),
+                f"{m.pattern_id}\n[dim]{name_display}[/dim]",
+                f"[{score_style}]{m.score:.2f}[/{score_style}]",
+                str(m.hop_count),
+                f"[{rate_style}]{m.estimated_pass_rate}%[/{rate_style}]",
+                ", ".join(m.infra_match) if m.infra_match else "-",
+                ", ".join(m.infra_missing) if m.infra_missing else "-",
+            )
+
+        console.print(table)
+
+        # Show details for top match
+        if matches:
+            top = matches[0]
+            console.print(f"\n[bold]Top Match: {top.pattern_id}[/bold]")
+            console.print(f"  Score: {top.score:.2f}")
+            console.print(f"  Languages: {', '.join(top.language_match)}")
+            console.print(f"  Infra present: {', '.join(top.infra_match)}")
+            if top.infra_missing:
+                console.print(f"  Infra to add: {', '.join(top.infra_missing)}")
+            console.print(f"  Code patterns: {', '.join(top.pattern_match)}")
+            if top.pattern_missing:
+                console.print(f"  Patterns to add: {', '.join(top.pattern_missing)}")
+
+        # Phase 2: Neural hop mapping (optional)
+        if neural and matches:
+            import asyncio
+
+            top_match = matches[0]
+            console.print(f"\n[bold]Phase 2: Neural hop mapping for {top_match.pattern_id}[/bold]\n")
+
+            # Load the full pattern YAML
+            pattern_file = Path(patterns_dir) / f"{top_match.pattern_id}.yaml"
+            if not pattern_file.exists():
+                console.print(f"[red]Pattern file not found: {pattern_file}[/red]")
+                return
+
+            with open(pattern_file) as f:
+                pattern_data = yaml.safe_load(f)
+
+            with console.status("[bold green]Agent mapping hops to codebase...[/bold green]"):
+                hop_result = asyncio.run(neural_map_hops(analysis_path, pattern_data, model))
+
+            console.print(f"\n[bold]Feasibility: {hop_result.get('feasibility', 'unknown')}[/bold]")
+            if hop_result.get("feasibility_rationale"):
+                console.print(f"  {hop_result['feasibility_rationale']}")
+
+            mappings = hop_result.get("hop_mappings", [])
+            if mappings:
+                console.print(f"\n[bold]Hop Mappings ({len(mappings)}):[/bold]\n")
+                for hm in mappings:
+                    mapped = hm.get("mapped_to", {})
+                    files = mapped.get("files", [])
+                    conf = hm.get("confidence", 0)
+                    conf_style = "green" if conf >= 0.7 else "yellow" if conf >= 0.4 else "red"
+                    console.print(
+                        f"  Hop {hm.get('hop', '?')}: [{hm.get('component', '?')}] "
+                        f"-> [{conf_style}]{conf:.0%}[/{conf_style}]"
+                    )
+                    if files:
+                        console.print(f"    Files: {', '.join(files)}")
+                    if mapped.get("injection_description"):
+                        console.print(f"    Action: {mapped['injection_description']}")
+
+            mods = hop_result.get("modifications_needed", [])
+            if mods:
+                console.print(f"\n[bold]Modifications needed:[/bold]")
+                for mod in mods:
+                    console.print(f"  - {mod}")
+
+            # Save neural results
+            if output:
+                import json as json_mod
+                with open(output, "w") as f:
+                    json_mod.dump({"phase1": matches[0].__dict__, "phase2": hop_result}, f, indent=2, default=str)
+                console.print(f"\n[green]Full results saved to {output}[/green]")
+
+    finally:
+        # Clean up cloned repo
+        if temp_dir:
+            import shutil
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

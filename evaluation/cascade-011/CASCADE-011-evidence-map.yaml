@@ -897,36 +897,30 @@ logs:
 # FEATURE FLAGS
 # ===========================================================================
 feature_flags:
-  flags:
-    - name: "fulfillment_webhook_async"
-      value: true
-      description: "Enable async webhook dispatch for fulfillment batches"
-      last_modified: "2026-01-23T14:30:00Z"
-      modified_by: "dan"
+  - flag: "fulfillment_webhook_async"
+    current_value: true
+    state: "ENABLED"
+    last_modified: "2026-01-23T14:30:00Z"
 
-    - name: "order_hold_for_review_enabled"
-      value: true
-      description: "Enable hold_for_review flag processing in order pipeline"
-      last_modified: "2025-11-15T10:00:00Z"
-      modified_by: "priya"
+  - flag: "order_hold_for_review_enabled"
+    current_value: true
+    state: "ENABLED"
+    last_modified: "2025-11-15T10:00:00Z"
 
-    - name: "storefront_circuit_breaker_enabled"
-      value: true
-      description: "Enable circuit breaker on inventory service health"
-      last_modified: "2026-01-28T11:00:00Z"
-      modified_by: "alicia"
+  - flag: "storefront_circuit_breaker_enabled"
+    current_value: true
+    state: "ENABLED"
+    last_modified: "2026-01-28T11:00:00Z"
 
-    - name: "idempotency_key_format_v2"
-      value: true
-      description: "Use timestamp-based idempotency keys instead of UUIDs"
-      last_modified: "2026-01-23T14:30:00Z"
-      modified_by: "dan"
+  - flag: "idempotency_key_format_v2"
+    current_value: true
+    state: "ENABLED"
+    last_modified: "2026-01-23T14:30:00Z"
 
-    - name: "batch_retry_enabled"
-      value: true
-      description: "Enable automatic retry for failed batch dispatches"
-      last_modified: "2026-01-22T14:00:00Z"
-      modified_by: "priya"
+  - flag: "batch_retry_enabled"
+    current_value: true
+    state: "ENABLED"
+    last_modified: "2026-01-22T14:00:00Z"
 
 # ===========================================================================
 # GIT MCP SERVER

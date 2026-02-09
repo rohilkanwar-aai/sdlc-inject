@@ -75,9 +75,19 @@ def _add_verbose_metadata(data: dict) -> dict:
 
 EVIDENCE_FILE = Path(__file__).parent / "CASCADE-011-evidence-map.yaml"
 PERSONAS_FILE = Path(__file__).parent / "personas.yaml"
+TRAFFIC_DB = Path(__file__).parent / "traffic.db"
 
-# Load interactive servers: reactive Slack + time-progressing metrics + noise
+# Load interactive servers: reactive Slack + time-progressing metrics + noise (static evidence)
 SERVERS, TIMELINE = load_evidence_servers_interactive(str(EVIDENCE_FILE))
+
+# Initialize and start real-time traffic simulator
+from sdlc_inject.simulator.traffic import TrafficSimulator, init_traffic_db
+from sdlc_inject.mcp_servers import db_backed
+
+init_traffic_db(str(TRAFFIC_DB))
+_simulator = TrafficSimulator(str(TRAFFIC_DB), speed=1.0, seed=2026)
+_simulator.pre_seed(minutes=30)  # 30 min of historical traffic
+_simulator.start()  # Start generating live traffic in background
 
 # Load personas and initialize LLM coworker engine
 with open(PERSONAS_FILE) as f:
@@ -905,7 +915,131 @@ def _text(data) -> list[TextContent]:
 
 
 def _call_server(service: str, method: str, endpoint: str, params: dict) -> dict:
-    """Route a call to the appropriate evidence server."""
+    """Route a call to the appropriate evidence server.
+
+    For logs, metrics, and sentry: merges static (planted) evidence with
+    live traffic data from SQLite. Static evidence appears as "historical"
+    entries; SQLite has real-time data the simulator is continuously generating.
+    """
+    db = str(TRAFFIC_DB)
+
+    # --- Logs: merge static + live ---
+    if service == "logs":
+        if endpoint == "/services":
+            # Combine static service list with live services
+            static = SERVERS.get("logs")
+            static_resp = static.make_request(method, endpoint, params) if static else None
+            static_services = static_resp.body.get("services", []) if static_resp and static_resp.status == 200 else []
+            # Get live services from SQLite
+            live = db_backed.query_logs(db, limit=0)  # just to check
+            return _add_verbose_metadata({"services": static_services, "note": "Live traffic data is also available"})
+
+        if endpoint.startswith("/services/") and endpoint.endswith("/logs"):
+            svc = endpoint.split("/")[2]
+            # Get live data from SQLite
+            live_result = db_backed.query_logs(
+                db,
+                service=svc,
+                level=params.get("level", ""),
+                grep=params.get("grep", params.get("search", "")),
+                since=params.get("since", ""),
+                limit=int(params.get("limit", 50)),
+            )
+            # Also get static evidence
+            static = SERVERS.get("logs")
+            if static:
+                static_resp = static.make_request(method, endpoint, params)
+                if static_resp and static_resp.status == 200:
+                    static_entries = static_resp.body.get("entries", [])
+                    # Merge: static first (historical), then live (recent)
+                    combined = static_entries + live_result.get("entries", [])
+                    # Sort by timestamp descending
+                    combined.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
+                    return _add_verbose_metadata({
+                        "service": svc,
+                        "entries": combined[:int(params.get("limit", 50))],
+                        "total": len(combined),
+                        "has_more": live_result.get("has_more", False),
+                    })
+            return _add_verbose_metadata(live_result)
+
+        if endpoint == "/search":
+            query = params.get("query", params.get("q", ""))
+            live_result = db_backed.search_logs(db, query, limit=int(params.get("limit", 20)))
+            return _add_verbose_metadata(live_result)
+
+    # --- Metrics: live data preferred, static as fallback ---
+    if service == "prometheus":
+        if endpoint == "/query":
+            q = params.get("q", params.get("query", ""))
+            # Try live data first
+            live_result = db_backed.query_metrics(db, q)
+            if "result" in live_result:
+                return _add_verbose_metadata(live_result)
+            # Fall back to static evidence
+            static = SERVERS.get("prometheus")
+            if static:
+                static_resp = static.make_request(method, endpoint, params)
+                if static_resp and static_resp.status == 200:
+                    return _add_verbose_metadata(static_resp.body if isinstance(static_resp.body, dict) else {"data": static_resp.body})
+            return _add_verbose_metadata(live_result)
+
+        if endpoint == "/metrics":
+            # Merge static + live metric names
+            live = db_backed.list_metrics(db)
+            static = SERVERS.get("prometheus")
+            if static:
+                static_resp = static.make_request(method, endpoint, params)
+                if static_resp and static_resp.status == 200:
+                    static_metrics = static_resp.body.get("metrics", [])
+                    live_metrics = live.get("metrics", [])
+                    # Combine, dedup by name
+                    seen = set()
+                    combined = []
+                    for m in live_metrics + static_metrics:
+                        name = m.get("name", "")
+                        if name not in seen:
+                            seen.add(name)
+                            combined.append(m)
+                    return _add_verbose_metadata({"metrics": combined})
+            return _add_verbose_metadata(live)
+
+    # --- Sentry: merge static + live ---
+    if service == "sentry":
+        if endpoint == "/projects":
+            live = db_backed.list_sentry_projects(db)
+            static = SERVERS.get("sentry")
+            if static:
+                static_resp = static.make_request(method, endpoint, params)
+                if static_resp and static_resp.status == 200:
+                    static_projects = static_resp.body.get("projects", [])
+                    live_projects = live.get("projects", [])
+                    seen = set()
+                    combined = []
+                    for p in static_projects + live_projects:
+                        name = p.get("name", "")
+                        if name not in seen:
+                            seen.add(name)
+                            combined.append(p)
+                    return _add_verbose_metadata({"projects": combined})
+            return _add_verbose_metadata(live)
+
+        if endpoint == "/issues":
+            project = params.get("project", "")
+            live = db_backed.query_sentry(db, project=project)
+            static = SERVERS.get("sentry")
+            if static:
+                static_resp = static.make_request(method, endpoint, params)
+                if static_resp and static_resp.status == 200:
+                    static_issues = static_resp.body.get("issues", [])
+                    live_issues = live.get("issues", [])
+                    return _add_verbose_metadata({
+                        "issues": static_issues + live_issues,
+                        "total": len(static_issues) + len(live_issues),
+                    })
+            return _add_verbose_metadata(live)
+
+    # --- Default: static evidence server ---
     srv = SERVERS.get(service)
     if not srv:
         return _add_verbose_metadata({"error": f"Service not found: {service}"})

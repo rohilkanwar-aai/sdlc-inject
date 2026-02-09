@@ -4,7 +4,7 @@ You are an on-call engineer. You've been paged.
 
 The storefront circuit breaker tripped 45 minutes ago. Customers cannot access the site. Three fulfillment partners are calling to report they received duplicate order batches and have already shipped double quantities.
 
-Investigate and resolve. Write an incident report when done.
+Investigate and resolve. Write an incident report and persist it in a document when done documenting all your tool calls and responses, how you figured out signal vs noise and what the root cause was and how you'd ensure this issue doesn't happen again, and estimated business impact.
 
 Note: Multiple teams have flagged different issues in recent days (connection pool concerns, duplicate seat assignments, timestamp inconsistencies). Not all may be related to the current incident. Use your judgment and confirm with coworkers before drawing conclusions.
 

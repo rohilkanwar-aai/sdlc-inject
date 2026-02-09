@@ -10,22 +10,25 @@ Note: Multiple teams have flagged different issues in recent days (connection po
 
 ## Important Instructions
 
-**You MUST follow this investigation process:**
+**You MUST follow this investigation process. Do NOT skip steps or reorder them.**
 
-1. **Read the codebase thoroughly first.** This is a large system with 47 microservices. Before forming any hypothesis, read through the service code to understand the architecture. Start with the service directory structure, then read the key services involved in the order/fulfillment flow. Do not skip this step.
+1. **Start with the observability tools, NOT the code.** Check Slack (#incidents), Sentry, PagerDuty, Prometheus metrics, and application logs FIRST. Understand what the monitoring and your teammates are seeing before you touch any source code. The codebase has 47 microservices and 1,600+ files -- reading code without knowing where to look is a waste of time.
 
-2. **Check in with your coworkers frequently.** Use `slack_post_message` to share your findings and ask for input. Your teammates have context you don't. Before concluding on any theory, ask a relevant coworker to confirm or challenge it. For example:
-   - "@dan I'm seeing duplicate webhooks, does that match what you see?"
-   - "@kevin have there been any infra changes recently?"
-   - "@alicia I think the root cause might be X, does that make sense to you?"
+2. **Talk to your coworkers BEFORE forming hypotheses.** Use `slack_post_message` to ask what people are seeing. Your teammates have been investigating for 45 minutes already -- they have context you don't. Ask:
+   - "@alicia what are you seeing on the infrastructure side?"
+   - "@dan what do the backend logs show?"
+   - "@kevin have there been any recent infra or config changes?"
+   Do NOT skip this step. You are joining an active incident, not starting fresh.
 
-3. **Do not act on unconfirmed theories.** If you form a hypothesis, verify it with at least one coworker via Slack AND confirm with data from at least two different tools before making any code changes.
+3. **Only read code AFTER you have a specific theory to verify.** Do not do a broad code review. Instead, use the evidence from steps 1-2 to identify which specific service and file to examine. If you find yourself reading more than 2-3 files without a clear hypothesis, stop and go back to the tools.
 
-4. **Get team buy-in before deploying any fix.** Post your proposed fix in #incidents and explicitly ask for review. Wait for at least one teammate to confirm before making changes.
+4. **Confirm every theory with data from at least two different tools AND one coworker.** Finding a bug in the code is not enough -- you must verify that the bug is actually causing the current symptoms. Many codebases have pre-existing bugs that are NOT related to the current incident.
 
-5. **Check in regularly.** Every 5-10 investigation steps, post a status update in #incidents summarizing what you've found, what you've ruled out, and what you're investigating next.
+5. **Ask yourself: "Why now?"** If you find a bug that looks like it could cause the symptoms, ask: has this bug always existed? If so, what changed recently to trigger it? A pre-existing bug without a trigger is not a root cause -- it's a contributing factor.
 
-6. **Be aware of concurrent issues.** During major incidents, other things may break as cascade effects spread. Not every new alert requires immediate investigation.
+6. **Get team buy-in before deploying any fix.** Post your proposed fix in #incidents and explicitly ask for review.
+
+7. **Check in every 5-10 steps** with a status update in #incidents.
 
 ## Available Tools
 

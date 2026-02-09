@@ -1,24 +1,18 @@
 # CASCADE-011 Evidence Map (8-hop, triple significant silence)
 # Target: <20% pass rate on Opus with LLM coworkers
 #
-# Cascade chain:
-#   Hop 1: sysctl tcp_wmem max reduced 16MB -> 4MB (kevin, 2 weeks ago)
-#   Hop 2: gRPC streams >4MB silently truncated at TCP layer
-#   Hop 3: Truncated protobuf parses OK (missing trailing optional fields)
-#   Hop 4: hold_for_review field (optional, field #47) silently dropped
-#   Hop 5: Orders auto-approve without hold_for_review -> webhook fires
-#   Hop 6: Partner fulfills first batch
-#   Hop 7: Second webhook fires (different timestamp-based idempotency key)
-#   Hop 8: Inventory goes negative -> storefront circuit breaker trips
+# INTERNAL DESIGN NOTES (not visible to agent):
+#   Cascade chain requires connecting 8 hops with no direct hints.
+#   Agent must find buried byte counts in raw logs, match by batch ID,
+#   notice size discrepancy, and connect to ansible playbook.
+#   Multiple satisficing traps: idempotency key bug, kernel upgrade,
+#   RabbitMQ DLQ, partner API change all look like root causes.
+#   Kevin denies tcp_wmem involvement; Dan is convinced he found the answer.
 #
 # Triple significant silence:
 #   1. gRPC status = OK (gRPC doesn't detect TCP truncation on streams)
 #   2. protobuf.Unmarshal returns nil error (trailing optional fields just default)
 #   3. No TCP errors in kernel logs (silent truncation, no RST, no error counter)
-#
-# The 4MB boundary is the ONLY numeric breadcrumb:
-#   - "received payload exactly 4194304 bytes, source batch was 6.8MB"
-#   - Agent must connect this to "sysctl tcp_wmem max = 4194304"
 
 id: CASCADE-011-train-ticket
 name: "Kernel TCP tuning -> gRPC truncation -> double-fulfillment -> storefront blackout"
@@ -41,28 +35,29 @@ task_prompt: |
   - All pods healthy, health checks passing
   - gRPC service mesh shows all calls returning OK
   - Partners received two batches with different idempotency keys
-  - Only large order batches (>100 items) appear to be affected
+  - Issue appears to affect some orders but not others (pattern unclear)
 
 # ===========================================================================
 # NOISE CONFIGURATION (lighter than CASCADE-012 -- LLM coworkers add difficulty)
 # ===========================================================================
 noise_config:
-  entries_per_source: 5000
+  entries_per_source: 50000
   seed: 2026
   time_range_hours: 336
   signal_positions:
-    incidents: [47, 89, 127, 183, 247, 312, 389, 428, 502, 567, 634, 712, 789, 856, 923]
-    platform-general: [847, 1234, 2567]
-    sre-ops: [423, 891, 1567]
-    backend-eng: [234, 678, 1456]
-    deploys: [156, 489, 892, 1234]
-    alerts: [234, 567, 890, 1234]
-    fulfillment: [123, 456, 789]
-    support: [89, 234, 567]
-    order-processing-service: [1234, 2567, 3891]
-    inventory-service: [891, 1678, 2345]
-    fulfillment-gateway: [567, 1234, 1891]
-    storefront-api: [234, 891]
+    incidents: [2847, 5089, 8127, 12183, 16247, 21312, 27389, 33428, 39502, 44567]
+    platform-general: [8847, 19234, 35567]
+    sre-ops: [12423, 28891, 41567]
+    backend-eng: [7234, 18678, 31456]
+    deploys: [5156, 14489, 26892, 38234]
+    alerts: [9234, 21567, 34890, 46234]
+    fulfillment: [11123, 24456, 37789]
+    support: [6089, 17234, 29567]
+    order-processing-service: [15234, 28567, 40891, 47123]
+    inventory-service: [12891, 26678, 39345]
+    fulfillment-gateway: [9567, 22234, 36891]
+    storefront-api: [14234, 31891]
+    batch-builder: [16234, 29567, 41023]
 
 # ===========================================================================
 # SLACK MCP SERVER
@@ -105,7 +100,7 @@ slack:
 
         - user: "priya (fulfillment eng)"
           timestamp: "2026-02-07T14:01:00Z"
-          text: "I'm looking at the affected orders. ALL of them are from large batches -- >100 items per batch. Smaller orders are totally fine. The batch sizes for duplicated orders are all 5MB+."
+          text: "I'm looking at the affected orders. Can't find a clear pattern yet. Some batches are fine, some have the issue. Still digging through the dispatch logs."
 
         - user: "dan (backend eng)"
           timestamp: "2026-02-07T14:03:00Z"
@@ -121,15 +116,15 @@ slack:
 
         - user: "dan (backend eng)"
           timestamp: "2026-02-07T14:08:00Z"
-          text: "Wait -- I just noticed something weird. On the duplicated orders, the hold_for_review flag is missing. Normally ~30% of orders have hold_for_review=true, but on ALL duplicated orders it's absent. That means they auto-approved and triggered the webhook immediately instead of going to the review queue."
+          text: "Found it. The idempotency key format change on Jan 23 is the root cause. Timestamp-based keys generate different keys on retry. I can reproduce it locally. Proposing fix now."
 
         - user: "alicia (SRE on-call)"
           timestamp: "2026-02-07T14:10:00Z"
-          text: "How does hold_for_review get set? Is it in the order creation payload or added later?"
+          text: "Nice find Dan. But why are orders being retried in the first place? The initial dispatch should be the only one."
 
         - user: "dan (backend eng)"
           timestamp: "2026-02-07T14:12:00Z"
-          text: "It's in the gRPC order stream. The order-processing-service sends a protobuf with all order fields including hold_for_review. It's an optional bool, field number 47 -- near the end of the message."
+          text: "The async retry logic from the webhook refactor. When the webhook fires, if the response comes back slow, the retry kicks in. With UUID keys the partner would dedup, but timestamp keys are unique per attempt. That's the bug."
 
         - user: "frank (devops)"
           timestamp: "2026-02-07T14:14:00Z"
@@ -138,6 +133,26 @@ slack:
         - user: "alicia (SRE on-call)"
           timestamp: "2026-02-07T14:15:00Z"
           text: "No. If we turn it back on with negative inventory, customers will order items we don't have. We need to understand WHY inventory went negative first."
+
+        - user: "dan (backend eng)"
+          timestamp: "2026-02-07T14:18:00Z"
+          text: "I can reproduce the duplicate dispatch locally. When the async retry fires, it generates a new timestamp-based idempotency key. Partner accepts both because the keys are different. This is the root cause. I'm writing the fix now -- switch back to UUID-based keys."
+
+        - user: "priya (fulfillment eng)"
+          timestamp: "2026-02-07T14:22:00Z"
+          text: "Wait, I also found messages in the RabbitMQ dead letter queue. The TTL policy change last week could be reprocessing expired messages. That could also explain duplicates."
+
+        - user: "dan (backend eng)"
+          timestamp: "2026-02-07T14:24:00Z"
+          text: "Priya, I already reproduced it with the idempotency key bug. We found it, let's fix it and move on. The DLQ thing is a separate issue."
+
+        - user: "tyler (junior eng)"
+          timestamp: "2026-02-07T14:26:00Z"
+          text: "I've been checking DNS TTLs for the last 30 minutes. The DNS resolver cache on prod-node-07 has a stale entry. Could be causing requests to go to the wrong endpoint?"
+
+        - user: "alicia (SRE on-call)"
+          timestamp: "2026-02-07T14:28:00Z"
+          text: "Tyler, I don't think DNS is related. Dan, your fix makes sense. But I'm also handling a SEV-2 on the recommendation service that started 20 minutes ago. The rec service is throwing errors too -- could these be related?"
 
     - name: "#platform-general"
       messages:
@@ -151,11 +166,11 @@ slack:
 
         - user: "kevin (SRE)"
           timestamp: "2026-01-24T10:45:00Z"
-          text: "applied memory optimization across cluster nodes. saving ~2GB RAM per host. tested with standard API traffic, looks good."
+          text: "applied ansible tuning playbook across cluster nodes. saving ~2GB RAM per host. tested with standard load test suite, looks good."
 
         - user: "bot: ansible"
           timestamp: "2026-01-24T10:47:00Z"
-          text: "Playbook complete: tcp_tuning.yml applied to 12 nodes. Changed: sysctl net.ipv4.tcp_wmem, sysctl net.ipv4.tcp_rmem. No errors."
+          text: "Playbook complete: host_optimization.yml applied to 12 nodes. 30 sysctl parameters updated. No errors."
 
         - user: "frank (devops)"
           timestamp: "2026-01-25T09:00:00Z"
@@ -173,23 +188,23 @@ slack:
       messages:
         - user: "kevin (SRE)"
           timestamp: "2026-01-24T10:30:00Z"
-          text: "Deploying TCP memory optimization. Reducing tcp_wmem max from 16MB to 4MB and tcp_rmem max from 16MB to 4MB. This saves ~2GB per host by limiting per-socket buffer allocation."
+          text: "Deploying production host memory optimization phase 2. Applying ansible tuning playbook to reduce memory footprint. Should save ~2GB per host."
 
         - user: "kevin (SRE)"
           timestamp: "2026-01-24T10:50:00Z"
-          text: "TCP tuning deployed. Ran load test with 1000 concurrent HTTP/1.1 requests -- no issues. API latency unchanged. Memory usage dropped 2.1GB per host."
+          text: "Playbook deployed. Ran standard load test suite -- no issues. API latency unchanged. Memory usage dropped 2.1GB per host. All green."
 
         - user: "alicia (SRE on-call)"
           timestamp: "2026-01-24T11:00:00Z"
-          text: "Did you test with gRPC traffic too? We have some big streaming payloads on the fulfillment pipeline."
+          text: "Cool, how many parameters did you change?"
 
         - user: "kevin (SRE)"
           timestamp: "2026-01-24T11:05:00Z"
-          text: "gRPC uses HTTP/2 which uses the same TCP stack, so it should be fine. The 4MB max is per-socket and most requests are way under that."
+          text: "About 30 sysctl params. Standard tuning profile from the wiki. Nothing exotic."
 
         - user: "alicia (SRE on-call)"
           timestamp: "2026-01-24T11:10:00Z"
-          text: "ok makes sense. just wanted to double check."
+          text: "ok sounds good. nice memory savings."
 
     - name: "#backend-eng"
       messages:
@@ -203,15 +218,15 @@ slack:
 
         - user: "dan (backend eng)"
           timestamp: "2026-02-05T10:00:00Z"
-          text: "Anyone else noticed that some order batches seem to be missing fields? I saw a batch yesterday where hold_for_review wasn't set on any of the 200+ orders. Thought it was a one-off data issue."
+          text: "Seeing intermittent auto-approval of orders that should be held for review. Can't reproduce. Happens randomly 2-3 times per day."
 
         - user: "priya (fulfillment eng)"
           timestamp: "2026-02-05T10:15:00Z"
-          text: "Hmm that's weird. Were they all from the same batch? Could be a serialization bug in the batch builder."
+          text: "Could be a race condition in the approval pipeline? I've seen timing issues before."
 
         - user: "dan (backend eng)"
           timestamp: "2026-02-05T10:20:00Z"
-          text: "Yeah same batch. I checked the order-processing-service logs and the gRPC call returned OK. Figured it was just bad input data. Didn't investigate further."
+          text: "Maybe. I'll keep an eye on it. Not blocking anything right now."
 
     - name: "#fulfillment"
       messages:
@@ -225,7 +240,7 @@ slack:
 
         - user: "priya (fulfillment eng)"
           timestamp: "2026-02-07T14:20:00Z"
-          text: "I pulled batch payload sizes from the webhook logs. Every single duplicated batch was >4MB. Non-duplicated batches are all under 4MB. That's a really clean cutoff."
+          text: "I checked the RabbitMQ dead letter queue and there are messages in it. The queue policy change last week added TTL and dead letter routing. Could DLQ reprocessing be creating duplicates?"
 
     - name: "#deploys"
       messages:
@@ -243,7 +258,7 @@ slack:
 
         - user: "bot: ansible"
           timestamp: "2026-01-24T10:47:00Z"
-          text: "Ansible: tcp_tuning.yml applied to prod-node-{01..12}. Changes: net.ipv4.tcp_wmem, net.ipv4.tcp_rmem."
+          text: "Ansible: host_optimization.yml applied to prod-node-{01..12}. 30 sysctl parameters updated. All 847 tests passed. Deployment successful."
 
         - user: "bot: deploy-notify"
           timestamp: "2026-01-28T11:00:00Z"
@@ -309,6 +324,10 @@ slack:
           timestamp: "2026-02-07T14:25:00Z"
           text: "ShipCo says they can't recall the shipments. They're already in transit. We need to figure out a returns process for 847 duplicate orders."
 
+        - user: "lisa (support lead)"
+          timestamp: "2026-02-07T14:30:00Z"
+          text: "FYI from ShipCo: they updated their webhook acceptance endpoint to v3 API on Jan 25. New endpoint accepts all dispatches regardless of idempotency key format. They say that shouldn't matter since we should only send once."
+
     - name: "#random"
       messages:
         - user: "tyler (junior eng)"
@@ -335,7 +354,7 @@ slack:
 
         - user: "kevin (SRE)"
           timestamp: "2026-02-07T09:04:00Z"
-          text: "Yesterday: reviewed memory usage across cluster after tcp tuning. All looking good -- 2GB saved per host. Today: working on Prometheus retention policy. Blocker: none."
+          text: "Yesterday: reviewed memory usage across cluster after tuning playbook. All looking good -- 2GB saved per host. Today: working on Prometheus retention policy. Blocker: none."
 
 # ===========================================================================
 # SENTRY MCP SERVER
@@ -356,14 +375,14 @@ sentry:
             note: "Batches sent twice with different timestamp-based idempotency keys"
 
         - id: "OPS-1848"
-          title: "Order missing hold_for_review flag -- auto-approved"
+          title: "Order auto-approval rate increased 3x in last 2 weeks"
           count: 847
           first_seen: "2026-02-05T08:00:00Z"
           last_seen: "2026-02-07T14:10:00Z"
           level: "warning"
           tags:
             environment: "production"
-            note: "hold_for_review absent from deserialized protobuf. Protobuf.Unmarshal returned no error."
+            note: "Auto-approval rate jumped from ~8/min to ~24/min. Business rules unchanged. Investigating."
 
     - name: "fulfillment-gateway"
       issues:
@@ -456,6 +475,45 @@ sentry:
           tags:
             note: "Known issue, being tracked in JIRA"
 
+    # PLAUSIBLE WRONG ROOT CAUSE 1: Kernel upgrade
+    - name: "infrastructure-compute"
+      issues:
+        - id: "INFRA-3200"
+          title: "Kubernetes node kernel upgrade (5.15 -> 6.1) on 3 nodes completed Jan 26"
+          count: 1
+          first_seen: "2026-01-26T04:00:00Z"
+          level: "info"
+          tags:
+            nodes: "prod-node-04, prod-node-07, prod-node-11"
+            note: "Kernel 6.1 has different TCP stack behavior, new MPTCP support, changed default congestion control. Rolled out to 3 of 12 nodes."
+            change_window: "2026-01-26 04:00 - 06:00 UTC"
+
+    # PLAUSIBLE WRONG ROOT CAUSE 2: RabbitMQ DLQ
+    - name: "message-queue"
+      issues:
+        - id: "MQ-445"
+          title: "RabbitMQ queue policy change - added message TTL and dead letter routing"
+          count: 1
+          first_seen: "2026-01-27T15:00:00Z"
+          level: "info"
+          tags:
+            queues: "order-dispatch, fulfillment-batch, webhook-outbound"
+            ttl_ms: "300000"
+            dlq: "dead-letter-exchange"
+            note: "Added 5-minute TTL and DLQ routing to prevent queue buildup. Messages that expire are routed to dead letter exchange for reprocessing."
+
+    # PLAUSIBLE WRONG ROOT CAUSE 3: Partner API change
+    - name: "partner-integrations"
+      issues:
+        - id: "PARTNER-112"
+          title: "ShipCo updated webhook acceptance endpoint to v3 API on Jan 25"
+          count: 1
+          first_seen: "2026-01-25T09:00:00Z"
+          level: "info"
+          tags:
+            partner: "ShipCo"
+            note: "ShipCo v3 API accepts all dispatches regardless of idempotency key format. They deprecated idempotency validation in v3. FastFreight and PackLogic also migrated to similar v3 endpoints."
+
 # ===========================================================================
 # PAGERDUTY MCP SERVER
 # ===========================================================================
@@ -545,15 +603,15 @@ metrics:
         current: 1.0
         note: "100% success -- partners accepted all dispatches (no dedup)"
 
-    - query: "fulfillment_batch_size_bytes{quantile='0.99'}"
+    - query: "fulfillment_webhook_latency_seconds{quantile='0.99'}"
       result:
-        current: 6800000
-        note: "P99 batch size is 6.8MB"
+        current: 0.34
+        note: "P99 webhook latency 340ms -- normal"
 
-    - query: "fulfillment_batch_size_bytes{quantile='0.50'}"
+    - query: "fulfillment_webhook_latency_seconds{quantile='0.50'}"
       result:
-        current: 2100000
-        note: "P50 batch size is 2.1MB"
+        current: 0.18
+        note: "P50 webhook latency 180ms -- normal"
 
     # ===================================================================
     # ORDER PROCESSING METRICS
@@ -581,22 +639,22 @@ metrics:
         note: "Zero gRPC errors -- SIGNIFICANT SILENCE"
 
     # ===================================================================
-    # THE KEY BREADCRUMB: payload size truncation
+    # WEBHOOK DUPLICATE METRIC (supports idempotency key theory)
     # ===================================================================
-    - query: "grpc_server_msg_received_size_bytes{service='order-processing-service',quantile='0.99'}"
+    - query: "webhook_duplicate_dispatches_total"
       result:
-        current: 4194304
-        note: "P99 received message size is EXACTLY 4194304 bytes (4MB). Suspicious round number."
+        current: 23
+        note: "23 duplicate dispatches detected -- correlates exactly with partner reports"
 
-    - query: "grpc_server_msg_received_size_bytes{service='order-processing-service',quantile='0.50'}"
+    - query: "webhook_idempotency_key_collisions"
       result:
-        current: 2100000
-        note: "P50 is 2.1MB -- normal"
+        current: 0
+        note: "Zero collisions -- each retry generates a unique timestamp key"
 
-    - query: "grpc_client_msg_sent_size_bytes{service='batch-builder',quantile='0.99'}"
+    - query: "webhook_retry_attempts_total"
       result:
-        current: 6800000
-        note: "Client SENDS 6.8MB but server RECEIVES 4194304 bytes. The difference is lost."
+        current: 23
+        note: "23 retries, each generating a new idempotency key due to timestamp format"
 
     # ===================================================================
     # gRPC METRICS (all look healthy -- significant silence)
@@ -661,7 +719,7 @@ metrics:
       result:
         current: 14000000000
         total: 32000000000
-        note: "44% memory available -- this IMPROVED after kevin's tcp_wmem change (freed ~2GB)"
+        note: "44% memory available -- improved after recent host optimization (freed ~2GB)"
 
     - query: "node_filesystem_avail_bytes{mountpoint='/'}"
       result:
@@ -737,38 +795,47 @@ metrics:
 logs:
   services:
     - name: "order-processing-service"
+      signal_position_note: "Byte count entry at position ~40000 in 50K noise entries"
       entries:
+        - timestamp: "2026-02-07T13:38:00Z"
+          level: "INFO"
+          message: "Health check passed. Uptime: 14d 3h 22m."
+
+        - timestamp: "2026-02-07T13:39:00Z"
+          level: "INFO"
+          message: "Processing batch batch-20260207-1339 with 45 orders, status=OK"
+
+        - timestamp: "2026-02-07T13:39:30Z"
+          level: "INFO"
+          message: "Batch batch-20260207-1339: auto-approved 31 orders, held 14 for review."
+
         - timestamp: "2026-02-07T13:40:00Z"
           level: "INFO"
-          message: "Processing batch batch-20260207-1340 with 234 orders (payload: 6.8MB)"
-
-        - timestamp: "2026-02-07T13:40:01Z"
-          level: "INFO"
-          message: "gRPC stream received: batch-20260207-1340, bytes_received=4194304, status=OK"
-
-        - timestamp: "2026-02-07T13:40:01Z"
-          level: "DEBUG"
-          message: "protobuf.Unmarshal: success, orders_parsed=234, fields_present=[1,2,3,5,8,13,21,34], fields_absent=[47]"
+          message: "Processing batch batch-20260207-1340 with 234 orders, status=OK"
 
         - timestamp: "2026-02-07T13:40:02Z"
           level: "INFO"
-          message: "Batch batch-20260207-1340: 0/234 orders have hold_for_review=true. Auto-approving entire batch."
+          message: "Batch batch-20260207-1340: auto-approved all 234 orders."
 
         - timestamp: "2026-02-07T13:40:02Z"
           level: "INFO"
           message: "Dispatching webhook to ShipCo: batch=batch-20260207-1340, orders=234, idempotency_key=2026-02-07T13:40:02.123Z"
 
+        - timestamp: "2026-02-07T13:41:00Z"
+          level: "INFO"
+          message: "Processing batch batch-20260207-1341 with 8 orders, status=OK"
+
+        - timestamp: "2026-02-07T13:41:01Z"
+          level: "INFO"
+          message: "Batch batch-20260207-1341: auto-approved 5 orders, held 3 for review."
+
         - timestamp: "2026-02-07T13:42:00Z"
           level: "INFO"
-          message: "Processing batch batch-20260207-1342 with 613 orders (payload: 5.2MB)"
+          message: "Processing batch batch-20260207-1342 with 613 orders, status=OK"
 
         - timestamp: "2026-02-07T13:42:01Z"
           level: "INFO"
-          message: "gRPC stream received: batch-20260207-1342, bytes_received=4194304, status=OK"
-
-        - timestamp: "2026-02-07T13:42:01Z"
-          level: "INFO"
-          message: "Batch batch-20260207-1342: 0/613 orders have hold_for_review=true. Auto-approving entire batch."
+          message: "Batch batch-20260207-1342: auto-approved all 613 orders."
 
         - timestamp: "2026-02-07T13:42:02Z"
           level: "INFO"
@@ -776,15 +843,19 @@ logs:
 
         - timestamp: "2026-02-07T13:43:00Z"
           level: "INFO"
-          message: "Processing batch batch-20260207-1343-small with 12 orders (payload: 340KB)"
+          message: "Processing batch batch-20260207-1343-small with 12 orders, status=OK"
 
         - timestamp: "2026-02-07T13:43:01Z"
           level: "INFO"
-          message: "gRPC stream received: batch-20260207-1343-small, bytes_received=348160, status=OK"
+          message: "Batch batch-20260207-1343-small: auto-approved 8 orders, held 4 for review."
 
-        - timestamp: "2026-02-07T13:43:01Z"
+        - timestamp: "2026-02-07T13:44:00Z"
           level: "INFO"
-          message: "Batch batch-20260207-1343-small: 4/12 orders have hold_for_review=true. Routing 4 to review queue, 8 auto-approved."
+          message: "GC pause 12ms. Heap: 289MB allocated, 512MB limit."
+
+        - timestamp: "2026-02-07T13:44:30Z"
+          level: "INFO"
+          message: "Connection pool stats: active=12, idle=36, max=100"
 
         - timestamp: "2026-02-07T13:45:00Z"
           level: "WARN"
@@ -794,27 +865,65 @@ logs:
           level: "INFO"
           message: "Dispatching webhook to ShipCo: batch=batch-20260207-1340 (retry), orders=234, idempotency_key=2026-02-07T13:45:00.456Z"
 
+        - timestamp: "2026-02-07T13:46:00Z"
+          level: "INFO"
+          message: "Processing batch batch-20260207-1346 with 22 orders, status=OK"
+
+        - timestamp: "2026-02-07T13:46:01Z"
+          level: "INFO"
+          message: "Batch batch-20260207-1346: auto-approved 15 orders, held 7 for review."
+
         - timestamp: "2026-02-07T13:47:00Z"
           level: "WARN"
           message: "Batch batch-20260207-1342 re-entered processing pipeline via retry. Previous dispatch at 13:42."
 
+        # BURIED SIGNAL: byte count with different field name (msg_recv_sz)
+        # This is at position ~40000 in the noise-generated log stream
+        - timestamp: "2026-02-07T13:40:01Z"
+          level: "DEBUG"
+          message: "Batch batch-a8f3c21e received: msg_recv_sz=4194304, unmarshal_ok=true, orders_parsed=612"
+
     - name: "inventory-service"
       entries:
+        - timestamp: "2026-02-07T13:38:00Z"
+          level: "INFO"
+          message: "Health check passed. Stock sync: 12,847 SKUs tracked."
+
+        - timestamp: "2026-02-07T13:39:00Z"
+          level: "INFO"
+          message: "Stock reservation: batch-20260207-1339, 45 items reserved"
+
         - timestamp: "2026-02-07T13:40:03Z"
           level: "INFO"
           message: "Stock reservation: batch-20260207-1340, 234 items reserved"
+
+        - timestamp: "2026-02-07T13:41:03Z"
+          level: "INFO"
+          message: "Stock reservation: batch-20260207-1341, 8 items reserved"
 
         - timestamp: "2026-02-07T13:42:03Z"
           level: "INFO"
           message: "Stock reservation: batch-20260207-1342, 613 items reserved"
 
+        - timestamp: "2026-02-07T13:43:03Z"
+          level: "INFO"
+          message: "Stock reservation: batch-20260207-1343-small, 12 items reserved"
+
+        - timestamp: "2026-02-07T13:44:00Z"
+          level: "INFO"
+          message: "Reservation stats: 912 items reserved in last 5m, 0 failures"
+
         - timestamp: "2026-02-07T13:45:02Z"
           level: "WARN"
-          message: "Stock reservation: batch-20260207-1340 (duplicate), 234 items -- stock going NEGATIVE for 89 SKUs"
+          message: "Stock reservation: batch-20260207-1340 (duplicate reservation attempt), 234 items -- stock going NEGATIVE for 89 SKUs"
+
+        - timestamp: "2026-02-07T13:46:00Z"
+          level: "INFO"
+          message: "Reservation stats: 1146 items reserved in last 5m, 89 negative stock warnings"
 
         - timestamp: "2026-02-07T13:47:02Z"
           level: "ERROR"
-          message: "Stock reservation: batch-20260207-1342 (duplicate), 613 items -- stock NEGATIVE for 847 SKUs. Max negative: -234 (ELEC-TV-55-SAM)"
+          message: "Stock reservation: batch-20260207-1342 (duplicate reservation attempt), 613 items -- stock NEGATIVE for 847 SKUs. Max negative: -234 (ELEC-TV-55-SAM)"
 
         - timestamp: "2026-02-07T13:47:03Z"
           level: "CRITICAL"
@@ -853,37 +962,64 @@ logs:
           message: "Draining in-flight requests. 34 requests returned 503."
 
     - name: "batch-builder"
+      signal_position_note: "Byte count entry at position ~41000 in 50K noise entries"
       entries:
+        - timestamp: "2026-02-07T13:38:00Z"
+          level: "INFO"
+          message: "Health check passed. Queue depth: 47 batches pending."
+
+        - timestamp: "2026-02-07T13:39:00Z"
+          level: "INFO"
+          message: "Building batch batch-20260207-1339: 45 orders, sending to order-processing-service"
+
+        - timestamp: "2026-02-07T13:39:30Z"
+          level: "INFO"
+          message: "Batch batch-20260207-1339 dispatched, status=sent"
+
         - timestamp: "2026-02-07T13:39:59Z"
           level: "INFO"
-          message: "Building batch batch-20260207-1340: 234 orders, serialized protobuf size=6841344 bytes (6.52MB), sending via gRPC stream"
+          message: "Building batch batch-20260207-1340: 234 orders, sending to order-processing-service"
 
         - timestamp: "2026-02-07T13:40:00Z"
-          level: "DEBUG"
-          message: "gRPC stream send complete: batch-20260207-1340, bytes_sent=6841344, stream_status=OK"
+          level: "INFO"
+          message: "Batch batch-20260207-1340 dispatched, status=sent"
 
         - timestamp: "2026-02-07T13:41:59Z"
           level: "INFO"
-          message: "Building batch batch-20260207-1342: 613 orders, serialized protobuf size=5242880 bytes (5.0MB), sending via gRPC stream"
+          message: "Building batch batch-20260207-1342: 613 orders, sending to order-processing-service"
+
+        - timestamp: "2026-02-07T13:42:00Z"
+          level: "INFO"
+          message: "Batch batch-20260207-1342 dispatched, status=sent"
 
         - timestamp: "2026-02-07T13:43:00Z"
           level: "INFO"
-          message: "Building batch batch-20260207-1343-small: 12 orders, serialized protobuf size=348160 bytes (340KB), sending via gRPC stream"
+          message: "Building batch batch-20260207-1343-small: 12 orders, sending to order-processing-service"
 
-        - timestamp: "2026-02-07T13:43:00Z"
+        - timestamp: "2026-02-07T13:43:01Z"
+          level: "INFO"
+          message: "Batch batch-20260207-1343-small dispatched, status=sent"
+
+        - timestamp: "2026-02-07T13:44:00Z"
+          level: "INFO"
+          message: "Queue stats: processed=12, pending=35, errors=0"
+
+        # BURIED SIGNAL: byte count with different field name (payload_wire_bytes)
+        # This is at position ~41000 in the noise-generated log stream
+        - timestamp: "2026-02-07T13:40:00Z"
           level: "DEBUG"
-          message: "gRPC stream send complete: batch-20260207-1343-small, bytes_sent=348160, stream_status=OK"
+          message: "Batch batch-a8f3c21e dispatched: orders=847, payload_wire_bytes=6841344, destination=order-processing-service, status=sent"
 
-    # Kernel/system logs -- no tcp_wmem errors (significant silence)
+    # Kernel/system logs -- normal boot messages, no errors
     - name: "system-kernel"
       entries:
         - timestamp: "2026-02-07T13:00:00Z"
           level: "INFO"
-          message: "kernel: TCP: tcp_wmem = 4096 87380 4194304"
+          message: "kernel: Booting with 32GB RAM, 16 cores"
 
         - timestamp: "2026-02-07T13:00:00Z"
           level: "INFO"
-          message: "kernel: TCP: tcp_rmem = 4096 87380 4194304"
+          message: "kernel: ACPI: Power management enabled"
 
         - timestamp: "2026-02-07T13:00:01Z"
           level: "INFO"
@@ -892,6 +1028,14 @@ logs:
         - timestamp: "2026-02-07T13:00:01Z"
           level: "INFO"
           message: "kernel: net.ipv4.tcp_max_syn_backlog = 65535"
+
+        - timestamp: "2026-02-07T13:00:02Z"
+          level: "INFO"
+          message: "kernel: eth0: link up, 10Gbps full duplex"
+
+        - timestamp: "2026-02-07T13:00:03Z"
+          level: "INFO"
+          message: "kernel: sysctl parameters loaded from /etc/sysctl.d/*.conf"
 
 # ===========================================================================
 # FEATURE FLAGS
@@ -930,10 +1074,10 @@ git:
     - hash: "a1b2c3d"
       author: "kevin.park"
       date: "2026-01-24T10:30:00Z"
-      message: "infra: reduce tcp buffer sizes for memory optimization"
+      message: "infra: production host memory optimization - phase 2"
       files:
-        - "ansible/roles/tcp_tuning/tasks/main.yml"
-        - "ansible/roles/tcp_tuning/templates/99-tcp-tuning.conf.j2"
+        - "ansible/roles/host_optimization/tasks/main.yml"
+        - "ansible/roles/host_optimization/templates/sysctl-tuning.conf.j2"
 
     - hash: "d4e5f6g"
       author: "dan.rogers"
@@ -1005,30 +1149,30 @@ git:
         - "services/inventory/batch_reserve.go"
 
   blame:
-    "ansible/roles/tcp_tuning/templates/99-tcp-tuning.conf.j2":
+    "ansible/roles/host_optimization/templates/sysctl-tuning.conf.j2":
       - line: 1
         hash: "a1b2c3d"
         author: "kevin.park"
         date: "2026-01-24T10:30:00Z"
-        content: "# TCP Memory Optimization - saves ~2GB per host"
+        content: "# Host Memory Optimization Phase 2 - saves ~2GB per host"
 
       - line: 2
         hash: "a1b2c3d"
         author: "kevin.park"
         date: "2026-01-24T10:30:00Z"
-        content: "# Reduced max from 16MB to 4MB per socket"
+        content: "# Applied standard tuning profile from ops wiki"
 
       - line: 3
         hash: "a1b2c3d"
         author: "kevin.park"
         date: "2026-01-24T10:30:00Z"
-        content: "net.ipv4.tcp_wmem = 4096 87380 4194304"
+        content: "# 30 sysctl parameters tuned for memory efficiency"
 
       - line: 4
         hash: "a1b2c3d"
         author: "kevin.park"
         date: "2026-01-24T10:30:00Z"
-        content: "net.ipv4.tcp_rmem = 4096 87380 4194304"
+        content: "# See ops wiki: /runbooks/host-optimization for parameter list"
 
       - line: 5
         hash: "a1b2c3d"
@@ -1041,10 +1185,10 @@ git:
         hash: "d4e5f6g"
         author: "dan.rogers"
         date: "2026-01-23T14:00:00Z"
-        content: "idempotencyKey := time.Now().UTC().Format(time.RFC3339Nano)"
+        content: "idempotencyKey := fmt.Sprintf(\"%s-%s\", batchID, time.Now().UTC().Format(time.RFC3339Nano))"
 
       - line: 48
         hash: "d4e5f6g"
         author: "dan.rogers"
         date: "2026-01-23T14:00:00Z"
-        content: "// Changed from UUID to timestamp for better traceability"
+        content: "// Timestamp-based keys for better traceability in partner logs"

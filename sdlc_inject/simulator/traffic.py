@@ -306,15 +306,14 @@ class TrafficSimulator:
         """Write a snapshot of system metrics to the database."""
         metrics = {
             "order_processing_success_rate": max(0, min(1, 0.95 + self.rng.gauss(0, 0.02))),
-            "grpc_server_msg_received_size_bytes_p99": 4194304,  # ALWAYS 4MB
-            "grpc_client_msg_sent_size_bytes_p99": 6800000 + self.rng.randint(-200000, 200000),
+            # NO grpc message size metrics -- agent must find size discrepancy in raw logs
             "grpc_server_handled_total_status_OK": self.rng.randint(9000, 11000),
             "grpc_server_handled_total_status_error": 0,  # SIGNIFICANT SILENCE
             "inventory_negative_skus": self.negative_sku_count,
             "webhook_duplicate_sends_total": self.duplicate_webhook_count,
             "storefront_circuit_breaker_state": 1 if self.circuit_breaker_tripped else 0,
             "tcp_retransmit_rate": self.rng.uniform(0.001, 0.005),  # Normal
-            "net_ipv4_tcp_wmem_max": 4194304,  # The root cause value -- but looks like a normal metric
+            # NO tcp_wmem metric -- agent must discover via kubectl exec or ansible playbook
         }
         for name, value in metrics.items():
             conn.execute(

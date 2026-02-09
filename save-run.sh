@@ -49,4 +49,13 @@ if [ -f "${SRC}/CLAUDE.md" ]; then
     echo "Saved: ${DEST}/${PREFIX}-prompt.md"
 fi
 
+# Clean up project memory so next session starts fresh
+echo "Cleaning project memory..."
+for dir in ~/.claude/projects/*train-ticket* ~/.claude/projects/*train_ticket* ~/.claude/projects/*tmp*train*; do
+    if [ -d "$dir" ]; then
+        rm -rf "$dir"
+        echo "  Removed: $dir"
+    fi
+done
+
 echo "Done. Run 'git add ${DEST}/ && git commit -m \"grade: ${PREFIX}\"' to persist."

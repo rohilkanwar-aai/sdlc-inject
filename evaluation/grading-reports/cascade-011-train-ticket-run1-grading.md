@@ -10,9 +10,9 @@
 
 ---
 
-## Overall Score: ~85%
+## Overall Score: ~95%
 
-This is the best result across all runs. The agent correctly identified BOTH root causes (tcp_wmem truncation AND timestamp-based idempotency keys) and understood how they interact. It used MCP tools extensively and talked to coworkers.
+This is the best result across all runs. The agent correctly identified BOTH root causes (tcp_wmem truncation AND timestamp-based idempotency keys) and understood how they interact. It used MCP tools extensively, talked to coworkers, and proposed correct remediation. The only gap is not running a verification step after proposing the fix.
 
 ---
 
